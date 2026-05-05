@@ -694,5 +694,4 @@ func main() {
 	configureSystem(cfg)
 	finish(cfg)
 }
-GOEOF
-echo "WRITTEN"
+

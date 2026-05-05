@@ -1,3 +1,4 @@
+cat > /home/claude/vero/main.go << 'GOEOF'
 package main
 
 import (
@@ -9,7 +10,6 @@ import (
 	"time"
 )
 
-// ── ANSI colors ──────────────────────────────────────────────────────────────
 const (
 	reset   = "\033[0m"
 	bold    = "\033[1m"
@@ -23,8 +23,6 @@ const (
 	white   = "\033[97m"
 )
 
-// ── helpers ───────────────────────────────────────────────────────────────────
-
 func clear() { fmt.Print("\033[H\033[2J") }
 
 func banner() {
@@ -37,7 +35,7 @@ func banner() {
 	fmt.Println(bold + cyan + "   ╚████╔╝ ███████╗██║  ██║╚██████╔╝" + reset)
 	fmt.Println(bold + cyan + "    ╚═══╝  ╚══════╝╚═╝  ╚═╝ ╚═════╝ " + reset)
 	fmt.Println()
-	fmt.Println(dim + white + "  Arch-based Linux  ·  Simple. Fast. Yours." + reset)
+	fmt.Println(dim + white + "  VeroLinux  ·  Simple. Fast. Yours." + reset)
 	fmt.Println(dim + "  ─────────────────────────────────────────" + reset)
 	fmt.Println()
 }
@@ -47,21 +45,10 @@ func header(title string) {
 	fmt.Println(dim + "  " + strings.Repeat("─", 40) + reset)
 }
 
-func info(msg string) {
-	fmt.Printf("  %s•%s %s\n", cyan, reset, msg)
-}
-
-func success(msg string) {
-	fmt.Printf("  %s✓%s %s\n", green, reset, msg)
-}
-
-func warn(msg string) {
-	fmt.Printf("  %s!%s %s%s%s\n", yellow, reset, yellow, msg, reset)
-}
-
-func fail(msg string) {
-	fmt.Printf("  %s✗%s %s%s%s\n", red, reset, red, msg, reset)
-}
+func info(msg string)    { fmt.Printf("  %s•%s %s\n", cyan, reset, msg) }
+func success(msg string) { fmt.Printf("  %s✓%s %s\n", green, reset, msg) }
+func warn(msg string)    { fmt.Printf("  %s!%s %s%s%s\n", yellow, reset, yellow, msg, reset) }
+func fail(msg string)    { fmt.Printf("  %s✗%s %s%s%s\n", red, reset, red, msg, reset) }
 
 func prompt(label string) string {
 	fmt.Printf("  %s›%s %s: ", cyan, reset, label)
@@ -102,11 +89,11 @@ func spinRun(label string, cmd string, args ...string) error {
 	for {
 		select {
 		case err := <-done:
-			fmt.Printf("\r  %s%s%s %s ... ", cyan, "✓", reset, label)
+			fmt.Printf("\r  %s✓%s %s ... ", cyan, reset, label)
 			if err != nil {
-				fmt.Printf("%s%s%s\n", red, "failed", reset)
+				fmt.Printf("%sfailed%s\n", red, reset)
 			} else {
-				fmt.Printf("%s%s%s\n", green, "done", reset)
+				fmt.Printf("%sdone%s\n", green, reset)
 			}
 			return err
 		default:
@@ -129,10 +116,14 @@ func runSilent(cmd string, args ...string) error {
 	return c.Run()
 }
 
-// ── wifi check ───────────────────────────────────────────────────────────────
+// ── network ───────────────────────────────────────────────────────────────────
 
 func checkNetwork() {
 	header("Network")
+	// Start NetworkManager on the live ISO in case it isn't running yet
+	runSilent("systemctl", "start", "NetworkManager")
+	time.Sleep(2 * time.Second)
+
 	if err := runSilent("ping", "-c", "1", "-W", "2", "archlinux.org"); err == nil {
 		success("Network is up")
 		return
@@ -149,7 +140,22 @@ func checkNetwork() {
 	success("Network connected")
 }
 
-// ── disk helpers ─────────────────────────────────────────────────────────────
+// ── disk helpers ──────────────────────────────────────────────────────────────
+
+func detectDisks() []string {
+	out, err := exec.Command("lsblk", "-d", "-n", "-o", "NAME,TYPE").Output()
+	if err != nil {
+		return nil
+	}
+	var disks []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[1] == "disk" {
+			disks = append(disks, "/dev/"+fields[0])
+		}
+	}
+	return disks
+}
 
 func listDisks() {
 	fmt.Println()
@@ -157,25 +163,20 @@ func listDisks() {
 	fmt.Println()
 }
 
-// ── locale / timezone helpers ────────────────────────────────────────────────
-
-func listTimezones() {
-	run("timedatectl", "list-timezones")
-}
-
-// ── pacstrap packages ─────────────────────────────────────────────────────────
+// ── packages ──────────────────────────────────────────────────────────────────
 
 var basePkgs = []string{
 	"base", "base-devel", "linux", "linux-firmware", "linux-headers",
-	"networkmanager", "grub", "efibootmgr", "os-prober",
+	"networkmanager", "network-manager-applet", "grub", "efibootmgr", "os-prober",
 	"sudo", "vim", "nano", "git", "curl", "wget",
-	"htop", "neofetch", "fastfetch",
+	"htop", "fastfetch",
 	"pipewire", "pipewire-pulse", "wireplumber",
 	"zsh", "fish",
 	"ttf-jetbrains-mono-nerd", "ttf-nerd-fonts-symbols",
 	"grim", "slurp", "wl-clipboard",
 	"firefox", "thunar", "alacritty",
 	"ntfs-3g", "dosfstools", "exfatprogs",
+	"sddm",
 }
 
 var dePkgs = map[string][]string{
@@ -187,86 +188,106 @@ var dePkgs = map[string][]string{
 	},
 	"kde": {
 		"plasma", "plasma-wayland-session",
-		"kde-applications", "sddm",
+		"kde-applications",
 		"xdg-desktop-portal-kde",
 	},
 	"xfce4": {
 		"xfce4", "xfce4-goodies",
-		"lightdm", "lightdm-gtk-greeter",
 		"xorg-server", "xorg-xinit",
 	},
 }
 
-// ── fastfetch config ──────────────────────────────────────────────────────────
+// ── fastfetch ─────────────────────────────────────────────────────────────────
+
+var fastfetchLogo = `         {1}███             ███             ███             ██
+{1}       ███░            ███░            ███░            ███░
+{1}     ███░            ███░            ███░            ███░
+{1}     ███░            ███░            ███░            ███░
+{1}     ███░            ███░            ███░            ███░
+{1}      ██░            ███░            ███░            ███░
+{1}        ░            ███░            ███░            ███░
+{1}                  ░░░             ░░░             ░░░
+{1}             █$$\    $$\     ███             ███             ███
+{1}      ███$$ |   $$ |  ███░            ███░            ███░
+{1}     ███░ $$ |   $$ |█$$$$$$\   $$$$$$\█░ $$$$$$\    ███░
+{1}      ██░   \$$\  $$  |$$  __$$\ $$  __$$\ $$  __$$\ ███░
+{1}        ░      \$$\$$  /░$$$$$$$$ |$$ |█░\__|$$ /  $$ |█░
+{1}                  \$$$  /  $$   ____|$$ |      $$ |  $$ |
+{1}                   \$  /   \$$$$$$$\ $$ |      \$$$$$$  |
+{1}          ██        ░░\_/     \_______|\__|       \______/
+{1}          ░░░ ███             ███             ███             ███
+{1}       ██░            ███░            ███░            ███░
+{1}        ░            ███░            ███░            ███░
+{1}                     ███░            ███░            ███░
+{1}                     ███░            ███░            ███░            ██
+{1}       ███░            ███░            ███░            ███░
+{1}     ███░            ███░            ███░            ███░
+{1}      ░░░             ░░░             ░░░             ░░░
+{1}                 ███             ███             ███
+{1}                  ███░            ███░            ███░
+{1}                 ███░            ███░            ███░            ██
+`
 
 var fastfetchConfig = `{
   "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
   "logo": {
-    "source": "vero",
-    "color": {
-      "1": "cyan",
-      "2": "blue"
-    }
+    "source": "~/.config/fastfetch/logos/vero.txt",
+    "color": { "1": "cyan", "2": "blue" }
   },
   "display": {
     "separator": "  ",
-    "color": {
-      "keys": "cyan",
-      "title": "blue"
-    }
+    "color": { "keys": "cyan", "title": "blue" }
   },
   "modules": [
-    {
-      "type": "title",
-      "key": "",
-      "format": "{user-name}@{host-name}"
-    },
+    { "type": "title", "key": "", "format": "{user-name}@{host-name}" },
     "separator",
-    { "type": "os",      "key": " OS" },
-    { "type": "kernel",  "key": " Kernel" },
-    { "type": "uptime",  "key": "󱐋 Uptime" },
-    { "type": "packages","key": " Packages" },
-    { "type": "shell",   "key": " Shell" },
-    { "type": "display", "key": " Resolution" },
-    { "type": "de",      "key": " DE/WM" },
-    { "type": "terminal","key": " Terminal" },
-    { "type": "cpu",     "key": " CPU" },
-    { "type": "gpu",     "key": "󰍛 GPU" },
-    { "type": "memory",  "key": " Memory" },
-    { "type": "disk",    "key": "󰋊 Disk" },
+    { "type": "os",       "key": " OS",         "format": "VeroLinux" },
+    { "type": "kernel",   "key": " Kernel" },
+    { "type": "uptime",   "key": "󱐋 Uptime" },
+    { "type": "packages", "key": " Packages" },
+    { "type": "shell",    "key": " Shell" },
+    { "type": "display",  "key": " Resolution" },
+    { "type": "de",       "key": " DE/WM" },
+    { "type": "terminal", "key": " Terminal" },
+    { "type": "cpu",      "key": " CPU" },
+    { "type": "gpu",      "key": "󰍛 GPU" },
+    { "type": "memory",   "key": " Memory" },
+    { "type": "disk",     "key": "󰋊 Disk" },
     "separator",
     { "type": "colors", "symbol": "block", "paddingLeft": 1 }
   ]
 }
 `
 
-var fastfetchLogo = `// Vero logo for fastfetch
-// Place in ~/.config/fastfetch/logos/vero.txt
-{1}██╗   ██╗███████╗██████╗  ██████╗ 
-{1}██║   ██║██╔════╝██╔══██╗██╔═══██╗
-{1}██║   ██║█████╗  ██████╔╝██║   ██║
-{1}╚██╗ ██╔╝██╔══╝  ██╔══██╗██║   ██║
-{1} ╚████╔╝ ███████╗██║  ██║╚██████╔╝
-{1}  ╚═══╝  ╚══════╝╚═╝  ╚═╝ ╚═════╝ 
+// ── os-release — makes EVERYTHING show VeroLinux ──────────────────────────────
+var osRelease = `NAME="VeroLinux"
+PRETTY_NAME="VeroLinux"
+ID=verolinux
+ID_LIKE=arch
+BUILD_ID=rolling
+ANSI_COLOR="36;1"
+HOME_URL="https://github.com/Cgtlpa/VeroLinux"
+BUG_REPORT_URL="https://github.com/Cgtlpa/VeroLinux/issues"
 `
 
-// ── install steps ─────────────────────────────────────────────────────────────
+// ── config struct ─────────────────────────────────────────────────────────────
 
 type Config struct {
-	Disk       string
-	EFIPart    string
-	RootPart   string
-	SwapPart   string
-	Hostname   string
-	Username   string
-	Password   string
-	RootPass   string
-	Timezone   string
-	Locale     string
-	DE         string
-	Bootloader string
-	Swap       bool
+	Disk     string
+	EFIPart  string
+	RootPart string
+	SwapPart string
+	Hostname string
+	Username string
+	Password string
+	RootPass string
+	Timezone string
+	Locale   string
+	DE       string
+	Swap     bool
 }
+
+// ── gather config ─────────────────────────────────────────────────────────────
 
 func gatherConfig() Config {
 	var cfg Config
@@ -275,13 +296,42 @@ func gatherConfig() Config {
 	header("Disk Setup")
 	listDisks()
 
-	cfg.Disk = prompt("Target disk (e.g. /dev/sda or /dev/nvme0n1)")
+	disks := detectDisks()
+	suggested := ""
+	for _, d := range disks {
+		if strings.Contains(d, "nvme") {
+			suggested = d
+			break
+		}
+		if strings.Contains(d, "sda") && suggested == "" {
+			suggested = d
+		}
+	}
+
+	if len(disks) > 0 {
+		info("Detected disks:")
+		for _, d := range disks {
+			fmt.Printf("    %s%s%s\n", cyan, d, reset)
+		}
+		fmt.Println()
+	}
+
+	if suggested != "" {
+		cfg.Disk = promptDefault("Target disk", suggested)
+	} else {
+		cfg.Disk = prompt("Target disk (e.g. /dev/nvme0n1 or /dev/sda)")
+	}
+
 	if cfg.Disk == "" {
-		fail("No disk selected. Exiting.")
+		fail("No disk selected.")
+		os.Exit(1)
+	}
+	if _, err := os.Stat(cfg.Disk); err != nil {
+		fail("Disk not found: " + cfg.Disk)
 		os.Exit(1)
 	}
 
-	info("Vero will create 3 partitions: EFI (512M), SWAP (optional), ROOT (remaining)")
+	info("Vero will create: EFI (512M), optional SWAP (4G), ROOT (remaining)")
 	cfg.Swap = confirm("Create a swap partition? (recommended)")
 
 	header("System")
@@ -304,10 +354,10 @@ func gatherConfig() Config {
 
 	header("Desktop Environment")
 	fmt.Println()
-	fmt.Printf("  %s1%s  Hyprland  — wayland, tiling, minimal\n", cyan, reset)
+	fmt.Printf("  %s1%s  Hyprland   — wayland, tiling, minimal\n", cyan, reset)
 	fmt.Printf("  %s2%s  KDE Plasma — full-featured, wayland\n", cyan, reset)
-	fmt.Printf("  %s3%s  XFCE4     — lightweight, X11\n", cyan, reset)
-	fmt.Printf("  %s4%s  None      — bare base install\n", cyan, reset)
+	fmt.Printf("  %s3%s  XFCE4      — lightweight, X11\n", cyan, reset)
+	fmt.Printf("  %s4%s  None       — bare base install\n", cyan, reset)
 	fmt.Println()
 	deChoice := promptDefault("Choice", "1")
 
@@ -332,7 +382,6 @@ func partition(cfg *Config) {
 
 	disk := cfg.Disk
 	isNVMe := strings.Contains(disk, "nvme")
-
 	partSuffix := func(n int) string {
 		if isNVMe {
 			return fmt.Sprintf("%sp%d", disk, n)
@@ -340,36 +389,75 @@ func partition(cfg *Config) {
 		return fmt.Sprintf("%s%d", disk, n)
 	}
 
+	if _, err := os.Stat(disk); err != nil {
+		fail("Disk not found: " + disk)
+		os.Exit(1)
+	}
+
+	runSilent("bash", "-c", "umount "+disk+"* 2>/dev/null || true")
+	runSilent("bash", "-c", "swapoff "+disk+"* 2>/dev/null || true")
+
 	info("Wiping disk: " + disk)
 
-	// Build sgdisk commands
-	spinRun("Wiping partition table", "sgdisk", "--zap-all", disk)
-	spinRun("Creating EFI partition (512M)", "sgdisk", "-n", "1:0:+512M", "-t", "1:ef00", disk)
+	if err := spinRun("Wiping partition table", "sgdisk", "--zap-all", disk); err != nil {
+		fail("sgdisk failed — is the disk in use?")
+		os.Exit(1)
+	}
+	if err := spinRun("Creating EFI partition (512M)", "sgdisk", "-n", "1:0:+512M", "-t", "1:ef00", disk); err != nil {
+		fail("Failed to create EFI partition")
+		os.Exit(1)
+	}
 
 	if cfg.Swap {
-		spinRun("Creating SWAP partition (4G)", "sgdisk", "-n", "2:0:+4G", "-t", "2:8200", disk)
-		spinRun("Creating ROOT partition (remaining)", "sgdisk", "-n", "3:0:0", "-t", "3:8300", disk)
+		if err := spinRun("Creating SWAP partition (4G)", "sgdisk", "-n", "2:0:+4G", "-t", "2:8200", disk); err != nil {
+			fail("Failed to create SWAP partition")
+			os.Exit(1)
+		}
+		if err := spinRun("Creating ROOT partition (remaining)", "sgdisk", "-n", "3:0:0", "-t", "3:8300", disk); err != nil {
+			fail("Failed to create ROOT partition")
+			os.Exit(1)
+		}
 		cfg.EFIPart = partSuffix(1)
 		cfg.SwapPart = partSuffix(2)
 		cfg.RootPart = partSuffix(3)
 	} else {
-		spinRun("Creating ROOT partition (remaining)", "sgdisk", "-n", "2:0:0", "-t", "2:8300", disk)
+		if err := spinRun("Creating ROOT partition (remaining)", "sgdisk", "-n", "2:0:0", "-t", "2:8300", disk); err != nil {
+			fail("Failed to create ROOT partition")
+			os.Exit(1)
+		}
 		cfg.EFIPart = partSuffix(1)
 		cfg.SwapPart = ""
 		cfg.RootPart = partSuffix(2)
 	}
 
-	// Format
-	spinRun("Formatting EFI (FAT32)", "mkfs.fat", "-F32", cfg.EFIPart)
-	if cfg.Swap {
-		spinRun("Formatting SWAP", "mkswap", cfg.SwapPart)
-	}
-	spinRun("Formatting ROOT (ext4)", "mkfs.ext4", "-F", cfg.RootPart)
+	time.Sleep(1 * time.Second)
+	runSilent("partprobe", disk)
+	time.Sleep(1 * time.Second)
 
-	// Mount
-	spinRun("Mounting ROOT", "mount", cfg.RootPart, "/mnt")
+	if err := spinRun("Formatting EFI (FAT32)", "mkfs.fat", "-F32", cfg.EFIPart); err != nil {
+		fail("mkfs.fat failed on " + cfg.EFIPart)
+		os.Exit(1)
+	}
+	if cfg.Swap {
+		if err := spinRun("Formatting SWAP", "mkswap", cfg.SwapPart); err != nil {
+			fail("mkswap failed on " + cfg.SwapPart)
+			os.Exit(1)
+		}
+	}
+	if err := spinRun("Formatting ROOT (ext4)", "mkfs.ext4", "-F", cfg.RootPart); err != nil {
+		fail("mkfs.ext4 failed on " + cfg.RootPart)
+		os.Exit(1)
+	}
+
+	if err := spinRun("Mounting ROOT", "mount", cfg.RootPart, "/mnt"); err != nil {
+		fail("Could not mount " + cfg.RootPart)
+		os.Exit(1)
+	}
 	runSilent("mkdir", "-p", "/mnt/boot/efi")
-	spinRun("Mounting EFI", "mount", cfg.EFIPart, "/mnt/boot/efi")
+	if err := spinRun("Mounting EFI", "mount", cfg.EFIPart, "/mnt/boot/efi"); err != nil {
+		fail("Could not mount EFI partition")
+		os.Exit(1)
+	}
 	if cfg.Swap {
 		spinRun("Enabling SWAP", "swapon", cfg.SwapPart)
 	}
@@ -377,7 +465,7 @@ func partition(cfg *Config) {
 	success("Partitioning complete")
 }
 
-// ── install base ─────────────────────────────────────────────────────────────
+// ── install base ──────────────────────────────────────────────────────────────
 
 func installBase(cfg Config) {
 	header("Installing Base System")
@@ -410,27 +498,36 @@ func generateFstab() {
 	success("fstab written")
 }
 
-// ── chroot config ─────────────────────────────────────────────────────────────
+// ── chroot script ─────────────────────────────────────────────────────────────
 
 func chrootScript(cfg Config) string {
-	deEnable := ""
-	if cfg.DE == "kde" {
+	// SDDM is used for ALL desktop environments
+	deEnable := "# No desktop environment selected"
+	sddmSession := ""
+	if cfg.DE != "none" {
 		deEnable = "systemctl enable sddm"
-	} else if cfg.DE == "xfce4" {
-		deEnable = "systemctl enable lightdm"
-	} else if cfg.DE == "hyprland" {
-		deEnable = "# Hyprland: start via ~/.config/hypr/autostart or display-manager of choice"
+	}
+	// For Hyprland: create a wayland session file so SDDM can launch it
+	if cfg.DE == "hyprland" {
+		sddmSession = `
+mkdir -p /usr/share/wayland-sessions
+cat > /usr/share/wayland-sessions/hyprland.desktop << 'SEOF'
+[Desktop Entry]
+Name=Hyprland
+Comment=An intelligent dynamic tiling Wayland compositor
+Exec=Hyprland
+Type=Application
+SEOF
+`
 	}
 
-	fastfetchSetup := fmt.Sprintf(`
-mkdir -p /home/%s/.config/fastfetch/logos
+	fastfetchSetup := fmt.Sprintf(`mkdir -p /home/%s/.config/fastfetch/logos
 cat > /home/%s/.config/fastfetch/config.jsonc << 'FFEOF'
 %s
 FFEOF
 cat > /home/%s/.config/fastfetch/logos/vero.txt << 'LOGOEOF'
 %s
-LOGOEOF
-`, cfg.Username, cfg.Username, fastfetchConfig, cfg.Username, fastfetchLogo)
+LOGOEOF`, cfg.Username, cfg.Username, fastfetchConfig, cfg.Username, fastfetchLogo)
 
 	return fmt.Sprintf(`#!/bin/bash
 set -e
@@ -446,11 +543,16 @@ echo "LANG=%s" > /etc/locale.conf
 
 # Hostname
 echo "%s" > /etc/hostname
-cat >> /etc/hosts << EOF
+cat >> /etc/hosts << 'HEOF'
 127.0.0.1   localhost
 ::1         localhost
 127.0.1.1   %s.localdomain %s
-EOF
+HEOF
+
+# VeroLinux identity — overrides Arch everywhere (fastfetch, apps, GRUB)
+cat > /etc/os-release << 'OEOF'
+%s
+OEOF
 
 # Users
 echo "root:%s" | chpasswd
@@ -461,10 +563,11 @@ echo "%%wheel ALL=(ALL:ALL) ALL" >> /etc/sudoers
 # Initramfs
 mkinitcpio -P
 
-# GRUB bootloader
-grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=VERO
+# GRUB — branded as VeroLinux
+grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=VeroLinux
+sed -i 's/GRUB_DISTRIBUTOR=.*/GRUB_DISTRIBUTOR="VeroLinux"/' /etc/default/grub
 sed -i 's/GRUB_TIMEOUT=5/GRUB_TIMEOUT=3/' /etc/default/grub
-sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3 quiet"/GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3 quiet splash"/' /etc/default/grub
+sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3 quiet splash"/' /etc/default/grub
 grub-mkconfig -o /boot/grub/grub.cfg
 
 # Services
@@ -472,15 +575,16 @@ systemctl enable NetworkManager
 systemctl enable fstrim.timer
 systemctl enable bluetooth 2>/dev/null || true
 
-# Desktop environment
+# Desktop + SDDM
+%s
 %s
 
-# Fastfetch config
+# Fastfetch config + custom logo
 %s
 
-# Shell tweaks — add fastfetch to .bashrc and .zshrc
-echo -e "\n# Vero greeting\nfastfetch" >> /home/%s/.bashrc
-echo -e "\n# Vero greeting\nfastfetch" >> /home/%s/.zshrc 2>/dev/null || true
+# Auto-launch fastfetch on terminal open
+echo -e "\n# VeroLinux\nfastfetch" >> /home/%s/.bashrc
+echo -e "\n# VeroLinux\nfastfetch" >> /home/%s/.zshrc 2>/dev/null || true
 chown -R %s:%s /home/%s
 
 echo "CHROOT_DONE"
@@ -489,10 +593,12 @@ echo "CHROOT_DONE"
 		cfg.Locale, cfg.Locale,
 		cfg.Hostname,
 		cfg.Hostname, cfg.Hostname,
+		osRelease,
 		cfg.RootPass,
 		cfg.Username,
 		cfg.Username, cfg.Password,
 		deEnable,
+		sddmSession,
 		fastfetchSetup,
 		cfg.Username, cfg.Username,
 		cfg.Username, cfg.Username, cfg.Username,
@@ -503,8 +609,7 @@ func configureSystem(cfg Config) {
 	header("Configuring System")
 
 	script := chrootScript(cfg)
-	err := os.WriteFile("/mnt/vero-chroot.sh", []byte(script), 0755)
-	if err != nil {
+	if err := os.WriteFile("/mnt/vero-chroot.sh", []byte(script), 0755); err != nil {
 		fail("Could not write chroot script: " + err.Error())
 		os.Exit(1)
 	}
@@ -519,7 +624,7 @@ func configureSystem(cfg Config) {
 	success("System configured")
 }
 
-// ── unmount & finish ──────────────────────────────────────────────────────────
+// ── finish ────────────────────────────────────────────────────────────────────
 
 func finish(cfg Config) {
 	header("Finishing Up")
@@ -531,15 +636,15 @@ func finish(cfg Config) {
 	fmt.Println()
 	fmt.Println(bold + cyan + "  ┌─────────────────────────────────────────┐" + reset)
 	fmt.Println(bold + cyan + "  │                                         │" + reset)
-	fmt.Println(bold + cyan + "  │   " + green + "Vero installed successfully! 🎉       " + cyan + "│" + reset)
+	fmt.Println(bold + cyan + "  │   " + green + "VeroLinux installed successfully! 🎉  " + cyan + "│" + reset)
 	fmt.Println(bold + cyan + "  │                                         │" + reset)
-	fmt.Println(bold + cyan + "  │  " + white + " Remove your install media and reboot  " + cyan + " │" + reset)
+	fmt.Println(bold + cyan + "  │   " + white + "Remove install media and reboot       " + cyan + "│" + reset)
 	fmt.Println(bold + cyan + "  │                                         │" + reset)
 	fmt.Println(bold + cyan + "  └─────────────────────────────────────────┘" + reset)
 	fmt.Println()
-	fmt.Printf("  %s Hostname:%s  %s\n", dim, reset, cfg.Hostname)
-	fmt.Printf("  %s Username:%s  %s\n", dim, reset, cfg.Username)
-	fmt.Printf("  %s      DE :%s  %s\n", dim, reset, cfg.DE)
+	fmt.Printf("  %sHostname :%s  %s\n", dim, reset, cfg.Hostname)
+	fmt.Printf("  %sUsername :%s  %s\n", dim, reset, cfg.Username)
+	fmt.Printf("  %sDesktop  :%s  %s\n", dim, reset, cfg.DE)
 	fmt.Println()
 
 	if confirm("Reboot now?") {
@@ -556,8 +661,7 @@ func main() {
 	}
 
 	banner()
-
-	fmt.Println(bold + "  Welcome to Vero — the Arch-based installer" + reset)
+	fmt.Println(bold + "  Welcome to VeroLinux — the Arch-based installer" + reset)
 	fmt.Println(dim + "  This will guide you through a complete installation." + reset)
 	fmt.Println()
 
@@ -591,3 +695,5 @@ func main() {
 	configureSystem(cfg)
 	finish(cfg)
 }
+GOEOF
+echo "WRITTEN"

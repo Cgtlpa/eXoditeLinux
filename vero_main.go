@@ -1,4 +1,3 @@
-cat > /home/claude/vero/main.go << 'GOEOF'
 package main
 
 import (

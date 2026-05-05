@@ -170,7 +170,7 @@ var basePkgs = []string{
 	"sudo", "vim", "nano", "git", "curl", "wget",
 	"htop", "fastfetch",
 	"pipewire", "pipewire-pulse", "wireplumber",
-	"zsh", "fish",
+	"zsh", "fish", "bluez",
 	"ttf-jetbrains-mono-nerd", "ttf-nerd-fonts-symbols",
 	"grim", "slurp", "wl-clipboard",
 	"firefox", "thunar", "alacritty",

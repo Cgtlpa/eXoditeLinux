@@ -166,14 +166,14 @@ func listDisks() {
 
 var basePkgs = []string{
 	"base", "base-devel", "linux", "linux-firmware", "linux-headers",
-	"networkmanager", "network-manager-applet", "grub", "efibootmgr", "os-prober",
+	"networkmanager", "network-manager-applet", "grub", "efibootmgr", 
 	"sudo", "vim", "nano", "git", "curl", "wget",
 	"htop", "fastfetch",
 	"pipewire", "pipewire-pulse", "wireplumber",
-	"zsh", "fish", "bluez",
+	"fish", "bluez",
 	"ttf-jetbrains-mono-nerd", "ttf-nerd-fonts-symbols",
 	"grim", "slurp", "wl-clipboard",
-	"firefox", "thunar", "alacritty",
+	"thunar", "kitty",
 	"ntfs-3g", "dosfstools", "exfatprogs",
 	"sddm",
 }
@@ -198,33 +198,17 @@ var dePkgs = map[string][]string{
 
 // ── fastfetch ─────────────────────────────────────────────────────────────────
 
-var fastfetchLogo = `         {1}███             ███             ███             ██
-{1}       ███░            ███░            ███░            ███░
-{1}     ███░            ███░            ███░            ███░
-{1}     ███░            ███░            ███░            ███░
-{1}     ███░            ███░            ███░            ███░
-{1}      ██░            ███░            ███░            ███░
-{1}        ░            ███░            ███░            ███░
-{1}                  ░░░             ░░░             ░░░
-{1}             █$$\    $$\     ███             ███             ███
-{1}      ███$$ |   $$ |  ███░            ███░            ███░
-{1}     ███░ $$ |   $$ |█$$$$$$\   $$$$$$\█░ $$$$$$\    ███░
-{1}      ██░   \$$\  $$  |$$  __$$\ $$  __$$\ $$  __$$\ ███░
-{1}        ░      \$$\$$  /░$$$$$$$$ |$$ |█░\__|$$ /  $$ |█░
-{1}                  \$$$  /  $$   ____|$$ |      $$ |  $$ |
-{1}                   \$  /   \$$$$$$$\ $$ |      \$$$$$$  |
-{1}          ██        ░░\_/     \_______|\__|       \______/
-{1}          ░░░ ███             ███             ███             ███
-{1}       ██░            ███░            ███░            ███░
-{1}        ░            ███░            ███░            ███░
-{1}                     ███░            ███░            ███░
-{1}                     ███░            ███░            ███░            ██
-{1}       ███░            ███░            ███░            ███░
-{1}     ███░            ███░            ███░            ███░
-{1}      ░░░             ░░░             ░░░             ░░░
-{1}                 ███             ███             ███
-{1}                  ███░            ███░            ███░
-{1}                 ███░            ███░            ███░            ██
+var fastfetchLogo = `{1}    $$\\    $$\\ 
+{1}    $$ |   $$ |
+{1}    $$ |   $$ |
+{1}    \\$$\\  $$  |
+{1}     \\$$\\$$  / 
+{1}      \\$$$  /  
+{1}       \\$  /   
+{1}        \\_/    
+{1}               
+{1}               
+{1}               
 `
 
 var fastfetchConfig = `{

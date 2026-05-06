@@ -678,4 +678,3 @@ func main() {
 	configureSystem(cfg)
 	finish(cfg)
 }
-

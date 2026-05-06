@@ -20,20 +20,25 @@ type Config struct {
 }
 
 func main() {
+	
 	if os.Getuid() != 0 {
 		fmt.Println("Please run as root!")
 		os.Exit(1)
 	}
 
+	setupNetwork()
+
+
 	header("Welcome to the eXodite Linux Installer")
 	cfg := gatherConfig()
+
+
 	partition(cfg)
 	installBase(cfg)
 	configure(cfg)
 	
 	header("Installation Complete! You can now reboot.")
 }
-
 func header(msg string) {
 	fmt.Printf("\n\033[36m=== %s ===\033[0m\n\n", msg)
 }
@@ -98,6 +103,25 @@ func prompt(msg string) string {
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Scan()
 	return strings.TrimSpace(scanner.Text())
+}
+
+func setupNetwork() {
+	header("Checking Network Connection")
+	
+	// Force start NetworkManager just in case
+	spinRun("Starting Network Manager", "systemctl", "start", "NetworkManager")
+
+	// Check if we have internet by pinging Google's DNS
+	err := exec.Command("ping", "-c", "1", "8.8.8.8").Run()
+	if err != nil {
+		fmt.Println("\n\033[33m[!] No internet connection detected.\033[0m")
+		confirm := prompt("Would you like to configure Wi-Fi/Ethernet now? (y/n)")
+		if strings.ToLower(confirm) == "y" {
+			run("nmtui")
+		}
+	} else {
+		fmt.Println("[\033[32m✓\033[0m] Internet connection active!")
+	}
 }
 
 func gatherConfig() Config {

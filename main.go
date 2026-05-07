@@ -28,6 +28,11 @@ func main() {
 	setupNetwork()
 	header("Welcome to the eXodite Linux Installer")
 	cfg := gatherConfig()
+	
+	if cfg.Kernel == "linux-cachyos" {
+		setupCachyRepos()
+	}
+
 	partition(cfg)
 	installBase(cfg)
 	configure(cfg)
@@ -55,6 +60,7 @@ func spinRun(msg string, cmd string, args ...string) {
 	err := runSilent(cmd, args...)
 	if err != nil {
 		fmt.Printf("\r[\033[31mX\033[0m] %s... Failed!\n", msg)
+		fmt.Printf("Error details: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("\r[\033[32m✓\033[0m] %s... Done!  \n", msg)
@@ -112,12 +118,23 @@ func setupNetwork() {
 	}
 }
 
+func setupCachyRepos() {
+	header("Adding CachyOS Repositories")
+	run("pacman-key", "--recv-keys", "F1656F40D7482129")
+	run("pacman-key", "--lsign-key", "F1656F40D7482129")
+	runSilent("sh", "-c", "echo -e '\n[cachyos]\nInclude = /etc/pacman.d/cachyos-mirrorlist' >> /etc/pacman.conf")
+	run("pacman", "-Sy")
+}
+
 func gatherConfig() Config {
 	var cfg Config
 	out, _ := exec.Command("lsblk", "-d", "-n", "-o", "NAME").Output()
-	disks := strings.Split(strings.TrimSpace(string(out)), "\n")
-	for i := range disks {
-		disks[i] = "/dev/" + disks[i]
+	rawDisks := strings.Split(strings.TrimSpace(string(out)), "\n")
+	var disks []string
+	for _, d := range rawDisks {
+		if !strings.HasPrefix(d, "loop") && d != "" {
+			disks = append(disks, "/dev/"+d)
+		}
 	}
 
 	cfg.Disk = menuSelect("Select Target Disk", disks)
@@ -153,15 +170,26 @@ func partition(cfg Config) {
 func installBase(cfg Config) {
 	header("Installing eXodite Base")
 	pkgs := []string{"base", "base-devel", "linux-firmware", "networkmanager", "grub", "efibootmgr", "nano", "fastfetch", cfg.Kernel}
-	if cfg.Desktop == "KDE Plasma" {
+	
+	if cfg.Kernel == "linux-cachyos" {
+		pkgs = append(pkgs, "cachyos-keyring", "cachyos-mirrorlist", "cachyos-hooks")
+	}
+
+	switch cfg.Desktop {
+	case "KDE Plasma":
 		pkgs = append(pkgs, "plasma", "sddm", "konsole")
-	} else if cfg.Desktop == "XFCE4" {
+	case "XFCE4":
 		pkgs = append(pkgs, "xfce4", "xfce4-goodies", "lightdm", "lightdm-gtk-greeter")
-	} else if cfg.Desktop == "Hyprland" {
+	case "Hyprland":
 		pkgs = append(pkgs, "hyprland", "kitty", "waybar")
 	}
+	
 	args := append([]string{"/mnt"}, pkgs...)
-	run("pacstrap", args...)
+	err := run("pacstrap", args...)
+	if err != nil {
+		fmt.Println("CRITICAL ERROR: pacstrap failed to install core packages.")
+		os.Exit(1)
+	}
 }
 
 func configure(cfg Config) {
@@ -193,10 +221,12 @@ systemctl enable NetworkManager
 
 	if cfg.Desktop == "KDE Plasma" { script += "systemctl enable sddm\n" }
 	if cfg.Desktop == "XFCE4" { script += "systemctl enable lightdm\n" }
+	
 	script += fmt.Sprintf("echo \"fastfetch\" >> /home/%s/.bashrc\n", cfg.Username)
 	script += "echo \"fastfetch\" >> /root/.bashrc\n"
 
 	os.WriteFile("/mnt/setup.sh", []byte(script), 0755)
+	os.Chmod("/mnt/setup.sh", 0755)
 	run("arch-chroot", "/mnt", "/bin/bash", "/setup.sh")
 	os.Remove("/mnt/setup.sh")
 }

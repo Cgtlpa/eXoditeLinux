@@ -9,15 +9,15 @@ import (
 )
 
 type Config struct {
-	Disk     string
-	Kernel   string
-	Desktop  string
-	Hostname string
-	Username string
-	Password string
-	RootPass string
-	Timezone string
-	Keymap   string
+	Disk       string
+	Kernel     string
+	Desktop    string
+	Hostname   string
+	Username   string
+	Password   string
+	RootPass   string
+	Timezone   string
+	Keymap     string
 	InstallYay string
 }
 
@@ -62,7 +62,6 @@ func spinRun(msg string, cmd string, args ...string) {
 	err := runSilent(cmd, args...)
 	if err != nil {
 		fmt.Printf("\r\033[1;31m[X]\033[0m %s... Failed!\n", msg)
-		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("\r\033[1;32m[✓]\033[0m %s... Done!  \n", msg)
@@ -107,9 +106,7 @@ func prompt(msg, def string) string {
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Scan()
 	val := strings.TrimSpace(scanner.Text())
-	if val == "" {
-		return def
-	}
+	if val == "" { return def }
 	return val
 }
 
@@ -129,12 +126,14 @@ func setupNetwork() {
 }
 
 func setupCachyRepos() {
-	header("Fetching CachyOS Repos")
+	header("Preparing CachyOS Repos")
+	runSilent("pacman-key", "--init")
+	runSilent("pacman-key", "--populate", "archlinux")
+	run("pacman-key", "--recv-keys", "F1656F40D7482129")
+	run("pacman-key", "--lsign-key", "F1656F40D7482129")
 	runSilent("sh", "-c", "echo 'Server = https://mirror.cachyos.org/repo/$arch/$repo' > /etc/pacman.d/cachyos-mirrorlist")
-	runSilent("pacman-key", "--recv-keys", "F1656F40D7482129")
-	runSilent("pacman-key", "--lsign-key", "F1656F40D7482129")
-	runSilent("sh", "-c", "grep -q '\[cachyos\]' /etc/pacman.conf || echo -e '\n[cachyos]\nInclude = /etc/pacman.d/cachyos-mirrorlist' >> /etc/pacman.conf")
-	run("pacman", "-Sy")
+	runSilent("sh", "-c", "grep -q 'cachyos' /etc/pacman.conf || echo -e '\n[cachyos]\nInclude = /etc/pacman.d/cachyos-mirrorlist' >> /etc/pacman.conf")
+	run("pacman", "-Sy", "--noconfirm")
 }
 
 func gatherConfig() Config {
@@ -143,16 +142,13 @@ func gatherConfig() Config {
 	rawDisks := strings.Split(strings.TrimSpace(string(out)), "\n")
 	var disks []string
 	for _, d := range rawDisks {
-		if !strings.HasPrefix(d, "loop") && d != "" {
-			disks = append(disks, "/dev/"+d)
-		}
+		if !strings.HasPrefix(d, "loop") && d != "" { disks = append(disks, "/dev/"+d) }
 	}
 
-	cfg.Keymap = menuSelect("Keyboard Layout", []string{"us", "uk", "de", "fr", "es", "it"})
+	cfg.Keymap = menuSelect("Keyboard Layout", []string{"us", "de", "uk", "fr", "es"})
 	runSilent("loadkeys", cfg.Keymap)
-
-	cfg.Timezone = menuSelect("Select Timezone", []string{"Europe/Berlin", "Europe/London", "America/New_York", "America/Los_Angeles", "Asia/Tokyo", "UTC"})
-	cfg.Disk = menuSelect("Target Disk (WILL BE WIPED)", disks)
+	cfg.Timezone = menuSelect("Select Timezone", []string{"Europe/Berlin", "Europe/London", "America/New_York", "UTC"})
+	cfg.Disk = menuSelect("Target Disk", disks)
 	cfg.Kernel = menuSelect("Select Kernel", []string{"linux", "linux-zen", "linux-cachyos"})
 	cfg.Desktop = menuSelect("Desktop Environment", []string{"KDE Plasma", "XFCE4", "Hyprland", "None"})
 	cfg.InstallYay = menuSelect("Install Yay (AUR Helper)?", []string{"Yes", "No"})
@@ -160,7 +156,7 @@ func gatherConfig() Config {
 	fmt.Printf("\033[2J\033[H")
 	header("User Setup")
 	cfg.Hostname = prompt("Hostname", "exodite")
-	cfg.Username = prompt("Username", "")
+	cfg.Username = prompt("Username", "adrian")
 	cfg.Password = prompt("User Password", "")
 	cfg.RootPass = prompt("Root Password", "")
 	return cfg
@@ -171,12 +167,8 @@ func partition(cfg Config) {
 	spinRun("Wiping disk", "sgdisk", "-Z", cfg.Disk)
 	spinRun("Creating EFI", "sgdisk", "-n", "1:0:+1G", "-t", "1:ef00", cfg.Disk)
 	spinRun("Creating Root", "sgdisk", "-n", "2:0:0", "-t", "2:8300", cfg.Disk)
-
 	prefix := cfg.Disk
-	if strings.Contains(cfg.Disk, "nvme") || strings.Contains(cfg.Disk, "mmcblk") {
-		prefix += "p"
-	}
-
+	if strings.Contains(cfg.Disk, "nvme") { prefix += "p" }
 	spinRun("Formatting EFI", "mkfs.fat", "-F32", prefix+"1")
 	spinRun("Formatting Root", "mkfs.ext4", "-F", prefix+"2")
 	spinRun("Mounting Root", "mount", prefix+"2", "/mnt")
@@ -185,52 +177,43 @@ func partition(cfg Config) {
 }
 
 func installBase(cfg Config) {
-	header("Installing Base Packages")
+	header("Installing eXodite Base")
 	pkgs := []string{"base", "base-devel", "linux-firmware", "networkmanager", "grub", "efibootmgr", "nano", "git", "fastfetch", cfg.Kernel}
-	
 	if cfg.Kernel == "linux-cachyos" {
 		pkgs = append(pkgs, "cachyos-keyring", "cachyos-mirrorlist", "cachyos-hooks")
 	}
-
 	switch cfg.Desktop {
-	case "KDE Plasma":
-		pkgs = append(pkgs, "plasma", "sddm", "konsole")
-	case "XFCE4":
-		pkgs = append(pkgs, "xfce4", "xfce4-goodies", "lightdm", "lightdm-gtk-greeter")
-	case "Hyprland":
-		pkgs = append(pkgs, "hyprland", "kitty", "waybar")
+	case "KDE Plasma": pkgs = append(pkgs, "plasma", "sddm", "konsole")
+	case "XFCE4": pkgs = append(pkgs, "xfce4", "xfce4-goodies", "lightdm", "lightdm-gtk-greeter")
+	case "Hyprland": pkgs = append(pkgs, "hyprland", "kitty", "waybar")
 	}
-	
 	args := append([]string{"/mnt"}, pkgs...)
 	err := run("pacstrap", args...)
-	if err != nil {
-		fmt.Println("\033[31m[!] pacstrap failed.\033[0m")
-		os.Exit(1)
-	}
+	if err != nil { os.Exit(1) }
 }
 
 func configure(cfg Config) {
-	header("Configuring System")
+	header("Finalizing Configuration")
 	fstab, _ := exec.Command("genfstab", "-U", "/mnt").Output()
 	os.WriteFile("/mnt/etc/fstab", fstab, 0644)
 
 	osRel := "NAME=\"eXodite Linux\"\nID=exodite\nID_LIKE=arch\nPRETTY_NAME=\"eXodite Linux\"\n"
 	
-	ffConfig := "{\n\"logo\": {\"source\": \"~/.config/fastfetch/logo.txt\",\"padding\": {\"top\": 1, \"left\": 2}},\n\"modules\": [\"title\", \"separator\", \"os\", \"host\", \"kernel\", \"uptime\", \"packages\", \"shell\", \"display\", \"de\", \"wm\", \"terminal\", \"cpu\", \"gpu\", \"memory\", \"disk\", \"battery\", \"colors\"]\n}"
-	ffLogo := "\033[1;35m ███████╗██╗  ██╗ ██████╗ ██████╗ ██╗████████╗███████╗\n ██╔════╝╚██╗██╔╝██╔═══██╗██╔══██╗██║╚══██╔══╝██╔════╝\n █████╗   ╚███╔╝ ██║   ██║██║  ██║██║   ██║   █████╗  \n ██╔══╝   ██╔██╗ ██║   ██║██║  ██║██║   ██║   ██╔══╝  \n ███████╗██╔╝ ██╗╚██████╔╝██████╔╝██║   ██║   ███████╗\n ╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚═╝   ╚═╝   ╚══════╝\033[0m"
+	// EMBEDDED FASTFETCH CONFIG (Using hex for color to avoid escape errors)
+	colorPurple := "\x1b[1;35m"
+	colorReset := "\x1b[0m"
+	logo := colorPurple + ` ███████╗██╗  ██╗ ██████╗ ██████╗ ██╗████████╗███████╗
+ ██╔════╝╚██╗██╔╝██╔═══██╗██╔══██╗██║╚══██╔══╝██╔════╝
+ █████╗   ╚███╔╝ ██║   ██║██║  ██║██║   ██║   █████╗  
+ ██╔══╝   ██╔██╗ ██║   ██║██║  ██║██║   ██║   ██╔══╝  
+ ███████╗██╔╝ ██╗╚██████╔╝██████╔╝██║   ██║   ███████╗
+ ╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚═╝   ╚═╝   ╚══════╝` + colorReset
 
-	os.MkdirAll(fmt.Sprintf("/mnt/home/%s/.config/fastfetch", cfg.Username), 0755)
-	os.WriteFile(fmt.Sprintf("/mnt/home/%s/.config/fastfetch/config.jsonc", cfg.Username), []byte(ffConfig), 0644)
-	os.WriteFile(fmt.Sprintf("/mnt/home/%s/.config/fastfetch/logo.txt", cfg.Username), []byte(ffLogo), 0644)
-	
-	os.MkdirAll("/mnt/root/.config/fastfetch", 0755)
-	os.WriteFile("/mnt/root/.config/fastfetch/config.jsonc", []byte(ffConfig), 0644)
-	os.WriteFile("/mnt/root/.config/fastfetch/logo.txt", []byte(ffLogo), 0644)
+	confJson := `{"logo": {"source": "/etc/fastfetch/logo.txt"}, "modules": ["title","os","kernel","uptime","packages","shell","de","wm","cpu","gpu","memory"]}`
 
-	if cfg.Kernel == "linux-cachyos" {
-		runSilent("sh", "-c", "echo 'Server = https://mirror.cachyos.org/repo/$arch/$repo' > /mnt/etc/pacman.d/cachyos-mirrorlist")
-		runSilent("sh", "-c", "echo -e '\n[cachyos]\nInclude = /etc/pacman.d/cachyos-mirrorlist' >> /mnt/etc/pacman.conf")
-	}
+	os.MkdirAll("/mnt/etc/fastfetch", 0755)
+	os.WriteFile("/mnt/etc/fastfetch/logo.txt", []byte(logo), 0644)
+	os.WriteFile("/mnt/etc/fastfetch/config.jsonc", []byte(confJson), 0644)
 
 	script := fmt.Sprintf(`#!/bin/bash
 echo "KEYMAP=%s" > /etc/vconsole.conf
@@ -246,23 +229,19 @@ echo "root:%s" | chpasswd
 useradd -m -G wheel -s /bin/bash %s
 echo "%s:%s" | chpasswd
 echo "%%wheel ALL=(ALL:ALL) ALL" >> /etc/sudoers
-chown -R %s:%s /home/%s/.config
-
 mkinitcpio -P
 grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=eXodite
 grub-mkconfig -o /boot/grub/grub.cfg
 systemctl enable NetworkManager
-`, cfg.Keymap, cfg.Timezone, cfg.Hostname, osRel, cfg.RootPass, cfg.Username, cfg.Username, cfg.Password, cfg.Username, cfg.Username, cfg.Username)
+`, cfg.Keymap, cfg.Timezone, cfg.Hostname, osRel, cfg.RootPass, cfg.Username, cfg.Username, cfg.Password)
 
 	if cfg.Desktop == "KDE Plasma" { script += "systemctl enable sddm\n" }
 	if cfg.Desktop == "XFCE4" { script += "systemctl enable lightdm\n" }
-	
 	script += fmt.Sprintf("echo \"fastfetch\" >> /home/%s/.bashrc\n", cfg.Username)
 	script += "echo \"fastfetch\" >> /root/.bashrc\n"
 
 	if cfg.InstallYay == "Yes" {
-		script += fmt.Sprintf("su - %s -c \"git clone https://aur.archlinux.org/yay-bin.git ~/yay-bin && cd ~/yay-bin && makepkg -noconfirm -si\"\n", cfg.Username)
-		script += fmt.Sprintf("rm -rf /home/%s/yay-bin\n", cfg.Username)
+		script += fmt.Sprintf("su - %s -c \"git clone https://aur.archlinux.org/yay-bin.git ~/yay-bin && cd ~/yay-bin && makepkg -si --noconfirm\"\n", cfg.Username)
 	}
 
 	os.WriteFile("/mnt/setup.sh", []byte(script), 0755)

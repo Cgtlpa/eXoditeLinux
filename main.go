@@ -129,11 +129,9 @@ func setupCachyRepos() {
 	header("Preparing CachyOS Repos")
 	runSilent("pacman-key", "--init")
 	runSilent("pacman-key", "--populate", "archlinux")
-	run("pacman-key", "--recv-keys", "F1656F40D7482129")
-	run("pacman-key", "--lsign-key", "F1656F40D7482129")
-	runSilent("sh", "-c", "echo 'Server = https://mirror.cachyos.org/repo/$arch/$repo' > /etc/pacman.d/cachyos-mirrorlist")
+	runSilent("sh", "-c", "echo 'Server = https://mirror.cachyos.org/repo/x86_64/$repo' > /etc/pacman.d/cachyos-mirrorlist")
 	runSilent("sh", "-c", "grep -q 'cachyos' /etc/pacman.conf || echo -e '\n[cachyos]\nInclude = /etc/pacman.d/cachyos-mirrorlist' >> /etc/pacman.conf")
-	run("pacman", "-Sy", "--noconfirm")
+	run("pacman", "-Sy", "cachyos-keyring", "cachyos-mirrorlist", "cachyos-hooks", "--noconfirm", "--needed")
 }
 
 func gatherConfig() Config {
@@ -178,10 +176,18 @@ func partition(cfg Config) {
 
 func installBase(cfg Config) {
 	header("Installing eXodite Base")
-	pkgs := []string{"base", "base-devel", "linux-firmware", "networkmanager", "grub", "efibootmgr", "nano", "git", "fastfetch", cfg.Kernel}
+	pkgs := []string{"base", "base-devel", "linux-firmware", "networkmanager", "grub", "efibootmgr", "nano", "git", "fastfetch", cfg.Kernel, cfg.Kernel + "-headers"}
+	
+	if cfg.Kernel == "linux" {
+		pkgs = append(pkgs, "nvidia", "nvidia-utils")
+	} else {
+		pkgs = append(pkgs, "nvidia-dkms", "nvidia-utils")
+	}
+
 	if cfg.Kernel == "linux-cachyos" {
 		pkgs = append(pkgs, "cachyos-keyring", "cachyos-mirrorlist", "cachyos-hooks")
 	}
+
 	switch cfg.Desktop {
 	case "KDE Plasma": pkgs = append(pkgs, "plasma", "sddm", "konsole")
 	case "XFCE4": pkgs = append(pkgs, "xfce4", "xfce4-goodies", "lightdm", "lightdm-gtk-greeter")
@@ -199,7 +205,6 @@ func configure(cfg Config) {
 
 	osRel := "NAME=\"eXodite Linux\"\nID=exodite\nID_LIKE=arch\nPRETTY_NAME=\"eXodite Linux\"\n"
 	
-	// EMBEDDED FASTFETCH CONFIG (Using hex for color to avoid escape errors)
 	colorPurple := "\x1b[1;35m"
 	colorReset := "\x1b[0m"
 	logo := colorPurple + ` ███████╗██╗  ██╗ ██████╗ ██████╗ ██╗████████╗███████╗
@@ -215,6 +220,11 @@ func configure(cfg Config) {
 	os.WriteFile("/mnt/etc/fastfetch/logo.txt", []byte(logo), 0644)
 	os.WriteFile("/mnt/etc/fastfetch/config.jsonc", []byte(confJson), 0644)
 
+	if cfg.Kernel == "linux-cachyos" {
+		runSilent("sh", "-c", "echo 'Server = https://mirror.cachyos.org/repo/x86_64/$repo' > /mnt/etc/pacman.d/cachyos-mirrorlist")
+		runSilent("sh", "-c", "grep -q 'cachyos' /mnt/etc/pacman.conf || echo -e '\n[cachyos]\nInclude = /etc/pacman.d/cachyos-mirrorlist' >> /mnt/etc/pacman.conf")
+	}
+
 	script := fmt.Sprintf(`#!/bin/bash
 echo "KEYMAP=%s" > /etc/vconsole.conf
 ln -sf /usr/share/zoneinfo/%s /etc/localtime
@@ -225,6 +235,7 @@ echo "LANG=en_US.UTF-8" > /etc/locale.conf
 echo "%s" > /etc/hostname
 echo '%s' > /etc/os-release
 sed -i 's/GRUB_DISTRIBUTOR="Arch"/GRUB_DISTRIBUTOR="eXodite"/' /etc/default/grub
+sed -i 's/MODULES=()/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
 echo "root:%s" | chpasswd
 useradd -m -G wheel -s /bin/bash %s
 echo "%s:%s" | chpasswd

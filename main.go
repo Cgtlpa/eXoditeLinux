@@ -123,7 +123,6 @@ func menuSelect(title string, options []string) string {
 	buf := make([]byte, 3)
 
 	for {
-		// Keep the scroll window in sync with the cursor.
 		if selected < scrollOffset {
 			scrollOffset = selected
 		}
@@ -394,7 +393,7 @@ func partition(cfg Config) error {
 
 func installBase(cfg Config) error {
 	pkgs := []string{
-		"base", "base-devel", "linux-firmware",
+		"base", "sddm" "base-devel", "linux-firmware",
 		"networkmanager", "grub", "efibootmgr",
 		"nano", "vim", "git", "fastfetch",
 		cfg.Kernel, cfg.Kernel + "-headers",

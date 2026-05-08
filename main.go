@@ -217,19 +217,44 @@ func setupCachyLive() error {
 }
 
 var timezones = []string{
-	"Europe/Berlin", "Europe/London", "Europe/Paris", "Europe/Rome",
-	"America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles",
-	"Asia/Tokyo", "Asia/Shanghai", "Asia/Kolkata",
-	"Australia/Sydney", "UTC",
+	"Europe/Berlin",
+	"Europe/London",
+	"Europe/Paris",
+	"Europe/Rome",
+	"America/New_York",
+	"America/Chicago",
+	"America/Denver",
+	"America/Los_Angeles",
+	"Asia/Tokyo",
+	"Asia/Shanghai",
+	"Asia/Kolkata",
+	"Australia/Sydney",
+	"UTC",
 }
 
 var keymaps = []string{
-	"us", "de", "uk", "fr", "es", "it", "pt", "ru", "pl", "nl", "colemak",
+	"us",
+	"de",
+	"uk",
+	"fr",
+	"es",
+	"it",
+	"pt",
+	"ru",
+	"pl",
+	"nl",
+	"colemak",
 }
 
 var locales = []string{
-	"en_US.UTF-8", "en_GB.UTF-8", "de_DE.UTF-8", "fr_FR.UTF-8",
-	"es_ES.UTF-8", "it_IT.UTF-8", "pt_PT.UTF-8", "ru_RU.UTF-8",
+	"en_US.UTF-8",
+	"en_GB.UTF-8",
+	"de_DE.UTF-8",
+	"fr_FR.UTF-8",
+	"es_ES.UTF-8",
+	"it_IT.UTF-8",
+	"pt_PT.UTF-8",
+	"ru_RU.UTF-8",
 }
 
 func gatherConfig() Config {
@@ -273,7 +298,7 @@ func gatherConfig() Config {
 	}
 
 	cfg.Kernel = menuSelect("Kernel", []string{"linux", "linux-zen", "linux-cachyos"})
-	cfg.GPU = menuSelect("Graphics Driver", []string{"NVIDIA (proprietary)", "Open Source (Intel / AMD / Nouveau)"})
+	cfg.GPU = menuSelect("Graphics Driver", []string{"NVIDIA (proprietary)", "Open Source (Intel / AMD / Nouveau)", "None (No extra drivers)"})
 	cfg.Desktop = menuSelect("Desktop Environment", []string{"KDE Plasma", "XFCE4", "Hyprland", "None (TTY only)"})
 	cfg.InstallYay = menuSelect("Install Yay (AUR helper)?", []string{"Yes", "No"})
 
@@ -353,7 +378,7 @@ func installBase(cfg Config) error {
 		} else {
 			pkgs = append(pkgs, "nvidia-dkms", "nvidia-utils", "nvidia-settings")
 		}
-	} else {
+	} else if strings.HasPrefix(cfg.GPU, "Open Source") {
 		pkgs = append(pkgs, "mesa", "vulkan-radeon", "vulkan-intel", "libva-mesa-driver")
 	}
 
@@ -435,10 +460,10 @@ func configure(cfg Config) error {
 		script += "sed -i 's/MODULES=()/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf\n"
 	}
 
+	script += fmt.Sprintf("useradd -m -G wheel -s /bin/bash '%s'\n", cfg.Username)
+
 	script += "chpasswd < /passwd.tmp\n"
 	script += "rm -f /passwd.tmp\n"
-
-	script += fmt.Sprintf("useradd -m -G wheel -s /bin/bash '%s'\n", cfg.Username)
 
 	script += "echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/10-wheel\n"
 	script += "chmod 440 /etc/sudoers.d/10-wheel\n"

@@ -325,7 +325,12 @@ func gatherConfig() Config {
 	}
 
 	cfg.Kernel = menuSelect("Kernel", []string{"linux", "linux-zen", "linux-cachyos"})
-	cfg.GPU = menuSelect("Graphics Driver", []string{"NVIDIA (proprietary)", "Open Source (Intel / AMD / Nouveau)", "None (No extra drivers)"})
+	cfg.GPU = menuSelect("Graphics Driver", []string{
+		"NVIDIA (proprietary)",
+		"NVIDIA 580xx (AUR, DKMS)",
+		"Open Source (Intel / AMD / Nouveau)",
+		"None (No extra drivers)",
+	})
 	cfg.Desktop = menuSelect("Desktop Environment", []string{"KDE Plasma", "XFCE4", "Hyprland", "None (TTY only)"})
 	cfg.InstallYay = menuSelect("Install Yay (AUR helper)?", []string{"Yes", "No"})
 
@@ -392,18 +397,22 @@ func partition(cfg Config) error {
 }
 
 func installBase(cfg Config) error {
+
 	pkgs := []string{
-		"base", "sddm" "base-devel", "linux-firmware",
+		"base", "sddm", "base-devel", "linux-firmware",
 		"networkmanager", "grub", "efibootmgr",
 		"nano", "vim", "git", "fastfetch",
 		cfg.Kernel, cfg.Kernel + "-headers",
 	}
 
 	if strings.HasPrefix(cfg.GPU, "NVIDIA") {
-		if cfg.Kernel == "linux" {
-			pkgs = append(pkgs, "nvidia", "nvidia-utils", "nvidia-settings")
-		} else {
-			pkgs = append(pkgs, "nvidia-dkms", "nvidia-utils", "nvidia-settings")
+		
+		if cfg.GPU != "NVIDIA 580xx (AUR, DKMS)" {
+			if cfg.Kernel == "linux" {
+				pkgs = append(pkgs, "nvidia", "nvidia-utils", "nvidia-settings")
+			} else {
+				pkgs = append(pkgs, "nvidia-dkms", "nvidia-utils", "nvidia-settings")
+			}
 		}
 	} else if strings.HasPrefix(cfg.GPU, "Open Source") {
 		pkgs = append(pkgs, "mesa", "vulkan-radeon", "vulkan-intel", "libva-mesa-driver")
@@ -465,7 +474,12 @@ func configure(cfg Config) error {
 
 	osRel := "NAME=\"eXodite Linux\"\nID=exodite\nID_LIKE=arch\nPRETTY_NAME=\"eXodite Linux\"\n"
 
+
 	script := "#!/bin/bash\nset -e\n\n"
+
+	script += fmt.Sprintf("GPU_DRIVER=%q\n", cfg.GPU)
+	script += fmt.Sprintf("INSTALL_YAY=%q\n", cfg.InstallYay)
+
 
 	script += fmt.Sprintf("ln -sf /usr/share/zoneinfo/%s /etc/localtime\n", cfg.Timezone)
 	script += "hwclock --systohc\n"
@@ -487,6 +501,7 @@ func configure(cfg Config) error {
 		script += "sed -i 's/MODULES=()/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf\n"
 	}
 
+	// User setup
 	script += fmt.Sprintf("useradd -m -G wheel -s /bin/bash '%s'\n", cfg.Username)
 
 	script += "chpasswd < /passwd.tmp\n"
@@ -495,43 +510,83 @@ func configure(cfg Config) error {
 	script += "echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/10-wheel\n"
 	script += "chmod 440 /etc/sudoers.d/10-wheel\n"
 
-	script += "mkinitcpio -P\n"
-	script += "grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=eXodite\n"
-	script += "grub-mkconfig -o /boot/grub/grub.cfg\n"
+	script += `
+YAY_DONE=0
+
+if [ "$GPU_DRIVER" = "NVIDIA 580xx (AUR, DKMS)" ]; then
+    echo "==> Installing yay (AUR helper) for NVIDIA 580xx driver..."
+    # Temporary user for building AUR packages
+    useradd -m -s /bin/bash tempbuilder || true
+    usermod -aG wheel tempbuilder
+    echo '%wheel ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/99-yay-build
+    chmod 440 /etc/sudoers.d/99-yay-build
+
+    su - tempbuilder -c '
+        export HOME=/home/tempbuilder
+        cd "$HOME"
+        git clone https://aur.archlinux.org/yay-bin.git
+        cd yay-bin
+        makepkg -si --noconfirm
+        cd ..
+        rm -rf yay-bin
+    '
+
+    rm -f /etc/sudoers.d/99-yay-build
+    userdel -r tempbuilder 2>/dev/null || true
+
+    echo "==> Installing NVIDIA 580xx AUR driver..."
+    yay -S --noconfirm nvidia-580xx-dkms nvidia-580xx-utils nvidia-580xx-settings
+
+    YAY_DONE=1
+fi
+`
+
+	
+	script += `
+mkinitcpio -P
+grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=eXodite
+grub-mkconfig -o /boot/grub/grub.cfg
+`
+
 
 	script += "systemctl enable NetworkManager\n"
 
 	switch cfg.Desktop {
 	case "KDE Plasma":
-		
 		script += "systemctl enable sddm\n"
-		
 		script += "mkdir -p /etc/sddm.conf.d\n"
 		script += "printf '[Autologin]\\nRelogin=false\\n\\n[Theme]\\nCurrent=breeze\\n' > /etc/sddm.conf.d/exodite.conf\n"
 	case "XFCE4":
 		script += "systemctl enable lightdm\n"
 	}
 
+
 	script += fmt.Sprintf("echo 'fastfetch' >> /home/%s/.bashrc\n", cfg.Username)
 	script += "echo 'fastfetch' >> /root/.bashrc\n"
 
 	
-	if cfg.InstallYay == "Yes" {
-		script += fmt.Sprintf(`
-echo '%%wheel ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/99-yay-tmp
-su - '%s' -c '
-  export HOME=/home/%s
-  cd "$HOME"
-  git clone https://aur.archlinux.org/yay-bin.git yay-bin
-  cd yay-bin
-  makepkg -si --noconfirm
-  cd ..
-  rm -rf yay-bin
-'
-rm -f /etc/sudoers.d/99-yay-tmp
+	script += `
+if [ "$INSTALL_YAY" = "Yes" ] && [ "$YAY_DONE" -eq 0 ]; then
+    echo "==> Installing yay for user..."
+    useradd -m -s /bin/bash tempbuilder || true
+    usermod -aG wheel tempbuilder
+    echo '%wheel ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/99-yay-build
+    chmod 440 /etc/sudoers.d/99-yay-build
 
-`, cfg.Username, cfg.Username)
-	}
+    su - tempbuilder -c '
+        export HOME=/home/tempbuilder
+        cd "$HOME"
+        git clone https://aur.archlinux.org/yay-bin.git
+        cd yay-bin
+        makepkg -si --noconfirm
+        cd ..
+        rm -rf yay-bin
+    '
+
+    rm -f /etc/sudoers.d/99-yay-build
+    userdel -r tempbuilder 2>/dev/null || true
+fi
+`
 
 	scriptPath := "/mnt/setup.sh"
 	if err := os.WriteFile(scriptPath, []byte(script), 0700); err != nil {

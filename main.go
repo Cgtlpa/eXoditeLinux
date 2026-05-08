@@ -10,8 +10,6 @@ import (
 	"golang.org/x/term"
 )
 
-var scanner = bufio.NewScanner(os.Stdin)
-
 type Config struct {
 	Disk       string
 	Kernel     string
@@ -119,18 +117,46 @@ func menuSelect(title string, options []string) string {
 	}
 	defer term.Restore(fd, oldState)
 
+	const visibleRows = 10
 	selected := 0
+	scrollOffset := 0
 	buf := make([]byte, 3)
 
 	for {
+		// Keep the scroll window in sync with the cursor.
+		if selected < scrollOffset {
+			scrollOffset = selected
+		}
+		if selected >= scrollOffset+visibleRows {
+			scrollOffset = selected - visibleRows + 1
+		}
+
 		fmt.Fprint(tty, "\033[2J\033[H")
 		fmt.Fprintf(tty, "\n\033[1;35m=== %s ===\033[0m\n\n", title)
-		for i, opt := range options {
+
+		if scrollOffset > 0 {
+			fmt.Fprintf(tty, "     \033[90m↑ %d more\033[0m\n", scrollOffset)
+		} else {
+			fmt.Fprint(tty, "\n")
+		}
+
+		end := scrollOffset + visibleRows
+		if end > len(options) {
+			end = len(options)
+		}
+		for i := scrollOffset; i < end; i++ {
 			if i == selected {
-				fmt.Fprintf(tty, "\033[1;32m   → %s\033[0m\n", opt)
+				fmt.Fprintf(tty, "\033[1;32m   → %s\033[0m\n", options[i])
 			} else {
-				fmt.Fprintf(tty, "     %s\n", opt)
+				fmt.Fprintf(tty, "     %s\n", options[i])
 			}
+		}
+
+		remaining := len(options) - end
+		if remaining > 0 {
+			fmt.Fprintf(tty, "     \033[90m↓ %d more\033[0m\n", remaining)
+		} else {
+			fmt.Fprint(tty, "\n")
 		}
 
 		n, _ := tty.Read(buf)
@@ -139,15 +165,15 @@ func menuSelect(title string, options []string) string {
 		}
 
 		switch {
-		case n == 3 && buf[0] == 27 && buf[1] == 91 && buf[2] == 65:
+		case n == 3 && buf[0] == 27 && buf[1] == 91 && buf[2] == 65: // Up
 			if selected > 0 {
 				selected--
 			}
-		case n == 3 && buf[0] == 27 && buf[1] == 91 && buf[2] == 66:
+		case n == 3 && buf[0] == 27 && buf[1] == 91 && buf[2] == 66: // Down
 			if selected < len(options)-1 {
 				selected++
 			}
-		case buf[0] == 10 || buf[0] == 13:
+		case buf[0] == 10 || buf[0] == 13: // Enter
 			return options[selected]
 		}
 	}
@@ -170,6 +196,7 @@ func prompt(msg, def string, mask bool) string {
 		return string(b)
 	}
 
+	scanner := bufio.NewScanner(os.Stdin)
 	if scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -409,14 +436,6 @@ func configure(cfg Config) error {
 		return fmt.Errorf("writing fstab: %w", err)
 	}
 
-	if cfg.Kernel == "linux-cachyos" {
-		f, err := os.OpenFile("/mnt/etc/pacman.conf", os.O_APPEND|os.O_WRONLY, 0644)
-		if err == nil {
-			f.WriteString("\n[cachyos]\nInclude = /etc/pacman.d/cachyos-mirrorlist\n")
-			f.Close()
-		}
-	}
-
 	colorPurple := "\x1b[1;35m"
 	colorReset := "\x1b[0m"
 	logo := colorPurple +
@@ -457,7 +476,7 @@ func configure(cfg Config) error {
 	script += fmt.Sprintf("echo 'LC_ALL=%s' >> /etc/locale.conf\n", cfg.Locale)
 	script += fmt.Sprintf("echo '%s' > /etc/hostname\n", cfg.Hostname)
 	script += fmt.Sprintf("echo 'KEYMAP=%s' > /etc/vconsole.conf\n", cfg.Keymap)
-	script += fmt.Sprintf("echo '127.0.0.1 localhost\n::1 localhost\n127.0.1.1 %s.localdomain %s' > /etc/hosts\n",
+	script += fmt.Sprintf("printf '127.0.0.1 localhost\\n::1 localhost\\n127.0.1.1 %s.localdomain %s\\n' > /etc/hosts\n",
 		cfg.Hostname, cfg.Hostname)
 
 	script += fmt.Sprintf("printf '%%s' %q | tee /etc/os-release > /dev/null\n", osRel)
@@ -470,10 +489,11 @@ func configure(cfg Config) error {
 	}
 
 	script += fmt.Sprintf("useradd -m -G wheel -s /bin/bash '%s'\n", cfg.Username)
+
 	script += "chpasswd < /passwd.tmp\n"
 	script += "rm -f /passwd.tmp\n"
 
-	script += "echo '%wheel ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/10-wheel\n"
+	script += "echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/10-wheel\n"
 	script += "chmod 440 /etc/sudoers.d/10-wheel\n"
 
 	script += "mkinitcpio -P\n"
@@ -481,9 +501,14 @@ func configure(cfg Config) error {
 	script += "grub-mkconfig -o /boot/grub/grub.cfg\n"
 
 	script += "systemctl enable NetworkManager\n"
+
 	switch cfg.Desktop {
 	case "KDE Plasma":
+		
 		script += "systemctl enable sddm\n"
+		
+		script += "mkdir -p /etc/sddm.conf.d\n"
+		script += "printf '[Autologin]\\nRelogin=false\\n\\n[Theme]\\nCurrent=breeze\\n' > /etc/sddm.conf.d/exodite.conf\n"
 	case "XFCE4":
 		script += "systemctl enable lightdm\n"
 	}
@@ -491,22 +516,23 @@ func configure(cfg Config) error {
 	script += fmt.Sprintf("echo 'fastfetch' >> /home/%s/.bashrc\n", cfg.Username)
 	script += "echo 'fastfetch' >> /root/.bashrc\n"
 
+	
 	if cfg.InstallYay == "Yes" {
-		postInstall := `#!/bin/bash
-set -e
-git clone https://aur.archlinux.org/yay-bin.git /tmp/yay-bin
-cd /tmp/yay-bin && makepkg -si --noconfirm
-rm -rf /tmp/yay-bin
-echo "Yay installed successfully."
-`
-		script += fmt.Sprintf("cat << 'EOF_YAY' > /home/%s/install-yay.sh\n%s\nEOF_YAY\n", cfg.Username, postInstall)
-		script += fmt.Sprintf("chmod +x /home/%s/install-yay.sh\n", cfg.Username)
-		script += fmt.Sprintf("chown %s:%s /home/%s/install-yay.sh\n", cfg.Username, cfg.Username, cfg.Username)
-		script += fmt.Sprintf("su - %s -c \"/home/%s/install-yay.sh\"\n", cfg.Username, cfg.Username)
-		script += fmt.Sprintf("rm /home/%s/install-yay.sh\n", cfg.Username)
-	}
+		script += fmt.Sprintf(`
+echo '%%wheel ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/99-yay-tmp
+su - '%s' -c '
+  export HOME=/home/%s
+  cd "$HOME"
+  git clone https://aur.archlinux.org/yay-bin.git yay-bin
+  cd yay-bin
+  makepkg -si --noconfirm
+  cd ..
+  rm -rf yay-bin
+'
+rm -f /etc/sudoers.d/99-yay-tmp
 
-	script += "echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/10-wheel\n"
+`, cfg.Username, cfg.Username)
+	}
 
 	scriptPath := "/mnt/setup.sh"
 	if err := os.WriteFile(scriptPath, []byte(script), 0700); err != nil {

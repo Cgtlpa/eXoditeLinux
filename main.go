@@ -6,11 +6,14 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 type Config struct {
 	Disk       string
 	Kernel     string
+	GPU        string
 	Desktop    string
 	Hostname   string
 	Username   string
@@ -18,38 +21,71 @@ type Config struct {
 	RootPass   string
 	Timezone   string
 	Keymap     string
+	Locale     string
 	InstallYay string
 }
 
 func main() {
 	if os.Getuid() != 0 {
-		fmt.Println("\033[31m[!] Please run as root!\033[0m")
-		os.Exit(1)
+		die("Root privileges required.")
 	}
 
 	setupNetwork()
-	header("Welcome to the eXodite Linux Installer")
+	header("eXodite Linux Installer")
+
 	cfg := gatherConfig()
-	
-	if cfg.Kernel == "linux-cachyos" {
-		setupCachyRepos()
+
+	if err := runInstaller(cfg); err != nil {
+		fmt.Printf("\n\033[31m[!] Installation failed: %v\033[0m\n", err)
+		cleanup()
+		os.Exit(1)
 	}
 
-	partition(cfg)
-	installBase(cfg)
-	configure(cfg)
-	header("Installation Complete! You can now reboot into eXodite Linux.")
+	header("Success! Remove installation media and reboot.")
+}
+
+func runInstaller(cfg Config) error {
+	if cfg.Kernel == "linux-cachyos" {
+		if err := setupCachyLive(); err != nil {
+			return fmt.Errorf("CachyOS setup: %w", err)
+		}
+	}
+
+	steps := []struct {
+		name string
+		fn   func(Config) error
+	}{
+		{"Partitioning disk", partition},
+		{"Installing base system", installBase},
+		{"Configuring system", configure},
+	}
+
+	for _, s := range steps {
+		header(s.name)
+		if err := s.fn(cfg); err != nil {
+			return fmt.Errorf("%s: %w", s.name, err)
+		}
+	}
+	return nil
+}
+
+func cleanup() {
+	fmt.Println("[*] Unmounting filesystems...")
+	exec.Command("umount", "-R", "/mnt").Run()
 }
 
 func header(msg string) {
 	fmt.Printf("\n\033[1;35m=== %s ===\033[0m\n\n", msg)
 }
 
+func die(msg string) {
+	fmt.Printf("\033[31m[!] %s\033[0m\n", msg)
+	os.Exit(1)
+}
+
 func run(cmd string, args ...string) error {
 	c := exec.Command(cmd, args...)
-	c.Stdin = os.Stdin
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
+	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return c.Run()
 }
 
@@ -57,206 +93,396 @@ func runSilent(cmd string, args ...string) error {
 	return exec.Command(cmd, args...).Run()
 }
 
-func spinRun(msg string, cmd string, args ...string) {
+func spinRun(msg, cmd string, args ...string) error {
 	fmt.Printf("\033[1;36m[*]\033[0m %s...", msg)
-	err := runSilent(cmd, args...)
-	if err != nil {
-		fmt.Printf("\r\033[1;31m[X]\033[0m %s... Failed!\n", msg)
-		os.Exit(1)
+	if err := runSilent(cmd, args...); err != nil {
+		fmt.Printf("\r\033[1;31m[✗]\033[0m %s... Failed!\n", msg)
+		return err
 	}
-	fmt.Printf("\r\033[1;32m[✓]\033[0m %s... Done!  \n", msg)
+	fmt.Printf("\r\033[1;32m[✓]\033[0m %s\n", msg)
+	return nil
 }
 
 func menuSelect(title string, options []string) string {
-	exec.Command("stty", "-F", "/dev/tty", "cbreak", "min", "1").Run()
-	exec.Command("stty", "-F", "/dev/tty", "-echo").Run()
-	defer exec.Command("stty", "-F", "/dev/tty", "sane").Run()
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		die("Cannot open /dev/tty: " + err.Error())
+	}
+	defer tty.Close()
+
+	fd := int(tty.Fd())
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		die("Cannot set raw terminal: " + err.Error())
+	}
+	defer term.Restore(fd, oldState)
 
 	selected := 0
-	b := make([]byte, 3)
+	buf := make([]byte, 3)
 
 	for {
-		fmt.Printf("\033[2J\033[H")
-		header(title)
+		fmt.Fprint(tty, "\033[2J\033[H")
+		fmt.Fprintf(tty, "\n\033[1;35m=== %s ===\033[0m\n\n", title)
 		for i, opt := range options {
 			if i == selected {
-				fmt.Printf("\033[1;32m  → %s\033[0m\n", opt)
+				fmt.Fprintf(tty, "\033[1;32m   → %s\033[0m\n", opt)
 			} else {
-				fmt.Printf("    %s\n", opt)
+				fmt.Fprintf(tty, "     %s\n", opt)
 			}
 		}
 
-		os.Stdin.Read(b)
-		if b[0] == 27 && b[1] == 91 {
-			if b[2] == 65 && selected > 0 { selected-- }
-			if b[2] == 66 && selected < len(options)-1 { selected++ }
-		} else if b[0] == 10 {
-			break
+		n, _ := tty.Read(buf)
+		if n == 0 {
+			continue
+		}
+
+		switch {
+		case n == 3 && buf[0] == 27 && buf[1] == 91 && buf[2] == 65:
+			if selected > 0 {
+				selected--
+			}
+		case n == 3 && buf[0] == 27 && buf[1] == 91 && buf[2] == 66:
+			if selected < len(options)-1 {
+				selected++
+			}
+		case buf[0] == 10 || buf[0] == 13:
+			return options[selected]
 		}
 	}
-	return options[selected]
 }
 
-func prompt(msg, def string) string {
+func prompt(msg, def string, mask bool) string {
 	if def != "" {
-		fmt.Printf("\033[1;33m?\033[0m %s [\033[1;36m%s\033[0m]: ", msg, def)
+		fmt.Printf("\033[1;33m?\033[0m %s [%s]: ", msg, def)
 	} else {
 		fmt.Printf("\033[1;33m?\033[0m %s: ", msg)
 	}
+
+	if mask {
+		fd := int(os.Stdin.Fd())
+		b, err := term.ReadPassword(fd)
+		fmt.Println()
+		if err != nil || len(b) == 0 {
+			return def
+		}
+		return string(b)
+	}
+
 	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Scan()
-	val := strings.TrimSpace(scanner.Text())
-	if val == "" { return def }
-	return val
+	if scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			return def
+		}
+		return line
+	}
+	return def
 }
 
 func setupNetwork() {
-	header("Network Check")
 	runSilent("systemctl", "start", "NetworkManager")
-	err := exec.Command("ping", "-c", "1", "8.8.8.8").Run()
-	if err != nil {
-		fmt.Println("\033[31m[!] No internet detected.\033[0m")
-		resp := prompt("Configure networking now? (y/n)", "y")
-		if strings.ToLower(resp) == "y" {
+	if exec.Command("ping", "-c", "1", "-W", "3", "8.8.8.8").Run() != nil {
+		if strings.ToLower(prompt("Network offline. Open nmtui?", "y", false)) == "y" {
 			run("nmtui")
 		}
-	} else {
-		fmt.Println("\033[1;32m[✓]\033[0m Internet active!")
 	}
 }
 
-func setupCachyRepos() {
-	header("Preparing CachyOS Repos")
-	runSilent("pacman-key", "--init")
-	runSilent("pacman-key", "--populate", "archlinux")
-	runSilent("sh", "-c", "echo 'Server = https://mirror.cachyos.org/repo/x86_64/$repo' > /etc/pacman.d/cachyos-mirrorlist")
-	runSilent("sh", "-c", "grep -q 'cachyos' /etc/pacman.conf || echo -e '\n[cachyos]\nInclude = /etc/pacman.d/cachyos-mirrorlist' >> /etc/pacman.conf")
-	run("pacman", "-Sy", "cachyos-keyring", "cachyos-mirrorlist", "cachyos-hooks", "--noconfirm", "--needed")
+func setupCachyLive() error {
+	fmt.Println("[*] Configuring CachyOS repository...")
+
+	if err := spinRun("Receiving CachyOS key", "pacman-key", "--recv-keys", "F1656F40D7482129"); err != nil {
+		return err
+	}
+	if err := spinRun("Signing CachyOS key", "pacman-key", "--lsign-key", "F1656F40D7482129"); err != nil {
+		return err
+	}
+
+	conf, err := os.ReadFile("/etc/pacman.conf")
+	if err != nil {
+		return fmt.Errorf("reading pacman.conf: %w", err)
+	}
+	if !strings.Contains(string(conf), "[cachyos]") {
+		f, err := os.OpenFile("/etc/pacman.conf", os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return fmt.Errorf("opening pacman.conf: %w", err)
+		}
+		_, werr := f.WriteString("\n[cachyos]\nInclude = /etc/pacman.d/cachyos-mirrorlist\n")
+		f.Close()
+		if werr != nil {
+			return fmt.Errorf("writing pacman.conf: %w", werr)
+		}
+	}
+	return spinRun("Syncing CachyOS keyring", "pacman", "-Sy", "cachyos-keyring", "--noconfirm")
+}
+
+var timezones = []string{
+	"Europe/Berlin", "Europe/London", "Europe/Paris", "Europe/Rome",
+	"America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles",
+	"Asia/Tokyo", "Asia/Shanghai", "Asia/Kolkata",
+	"Australia/Sydney", "UTC",
+}
+
+var keymaps = []string{
+	"us", "de", "uk", "fr", "es", "it", "pt", "ru", "pl", "nl", "colemak",
+}
+
+var locales = []string{
+	"en_US.UTF-8", "en_GB.UTF-8", "de_DE.UTF-8", "fr_FR.UTF-8",
+	"es_ES.UTF-8", "it_IT.UTF-8", "pt_PT.UTF-8", "ru_RU.UTF-8",
 }
 
 func gatherConfig() Config {
 	var cfg Config
-	out, _ := exec.Command("lsblk", "-d", "-n", "-o", "NAME").Output()
-	rawDisks := strings.Split(strings.TrimSpace(string(out)), "\n")
-	var disks []string
-	for _, d := range rawDisks {
-		if !strings.HasPrefix(d, "loop") && d != "" { disks = append(disks, "/dev/"+d) }
+
+	out, err := exec.Command("lsblk", "-d", "-n", "-o", "NAME,SIZE,MODEL").Output()
+	if err != nil {
+		die("Could not detect disks.")
 	}
 
-	cfg.Keymap = menuSelect("Keyboard Layout", []string{"us", "de", "uk", "fr", "es"})
+	var disks []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		name := strings.Fields(line)[0]
+		if !strings.HasPrefix(name, "loop") {
+			disks = append(disks, "/dev/"+name+" ("+strings.TrimSpace(line[len(name):])+")")
+		}
+	}
+	if len(disks) == 0 {
+		die("No target disks found.")
+	}
+
+	cfg.Keymap = strings.Fields(menuSelect("Keyboard Layout", keymaps))[0]
 	runSilent("loadkeys", cfg.Keymap)
-	cfg.Timezone = menuSelect("Select Timezone", []string{"Europe/Berlin", "Europe/London", "America/New_York", "UTC"})
-	cfg.Disk = menuSelect("Target Disk", disks)
-	cfg.Kernel = menuSelect("Select Kernel", []string{"linux", "linux-zen", "linux-cachyos"})
-	cfg.Desktop = menuSelect("Desktop Environment", []string{"KDE Plasma", "XFCE4", "Hyprland", "None"})
-	cfg.InstallYay = menuSelect("Install Yay (AUR Helper)?", []string{"Yes", "No"})
+
+	cfg.Timezone = strings.Fields(menuSelect("Timezone", timezones))[0]
+	cfg.Locale = strings.Fields(menuSelect("Locale", locales))[0]
+
+	diskChoice := menuSelect("Target Disk (↑↓ to move, Enter to select)", disks)
+	cfg.Disk = strings.Fields(diskChoice)[0]
+
+	confirm := menuSelect(
+		fmt.Sprintf("⚠ ALL DATA ON %s WILL BE DESTROYED — continue?", cfg.Disk),
+		[]string{"No — go back", "Yes — wipe and install"},
+	)
+	if confirm != "Yes — wipe and install" {
+		fmt.Println("Aborted.")
+		os.Exit(0)
+	}
+
+	cfg.Kernel = menuSelect("Kernel", []string{"linux", "linux-zen", "linux-cachyos"})
+	cfg.GPU = menuSelect("Graphics Driver", []string{"NVIDIA (proprietary)", "Open Source (Intel / AMD / Nouveau)"})
+	cfg.Desktop = menuSelect("Desktop Environment", []string{"KDE Plasma", "XFCE4", "Hyprland", "None (TTY only)"})
+	cfg.InstallYay = menuSelect("Install Yay (AUR helper)?", []string{"Yes", "No"})
 
 	fmt.Printf("\033[2J\033[H")
-	header("User Setup")
-	cfg.Hostname = prompt("Hostname", "exodite")
-	cfg.Username = prompt("Username", "adrian")
-	cfg.Password = prompt("User Password", "")
-	cfg.RootPass = prompt("Root Password", "")
+	header("User Accounts")
+
+	cfg.Hostname = prompt("Hostname", "exodite", false)
+	cfg.Username = prompt("Username", "user", false)
+
+	for {
+		cfg.Password = prompt("User password", "", true)
+		confirm2 := prompt("Confirm user password", "", true)
+		if cfg.Password == confirm2 {
+			break
+		}
+		fmt.Println("\033[31m[!] Passwords do not match, try again.\033[0m")
+	}
+
+	for {
+		cfg.RootPass = prompt("Root password", "", true)
+		confirm2 := prompt("Confirm root password", "", true)
+		if cfg.RootPass == confirm2 {
+			break
+		}
+		fmt.Println("\033[31m[!] Passwords do not match, try again.\033[0m")
+	}
+
 	return cfg
 }
 
-func partition(cfg Config) {
-	header("Partitioning " + cfg.Disk)
-	spinRun("Wiping disk", "sgdisk", "-Z", cfg.Disk)
-	spinRun("Creating EFI", "sgdisk", "-n", "1:0:+1G", "-t", "1:ef00", cfg.Disk)
-	spinRun("Creating Root", "sgdisk", "-n", "2:0:0", "-t", "2:8300", cfg.Disk)
-	prefix := cfg.Disk
-	if strings.Contains(cfg.Disk, "nvme") { prefix += "p" }
-	spinRun("Formatting EFI", "mkfs.fat", "-F32", prefix+"1")
-	spinRun("Formatting Root", "mkfs.ext4", "-F", prefix+"2")
-	spinRun("Mounting Root", "mount", prefix+"2", "/mnt")
-	os.MkdirAll("/mnt/boot/efi", 0755)
-	spinRun("Mounting EFI", "mount", prefix+"1", "/mnt/boot/efi")
+func partition(cfg Config) error {
+	disk := cfg.Disk
+
+	if err := spinRun("Wiping partition table on "+disk, "sgdisk", "-Z", disk); err != nil {
+		return err
+	}
+	if err := spinRun("Creating EFI partition (1 GiB)", "sgdisk", "-n", "1:0:+1G", "-t", "1:ef00", disk); err != nil {
+		return err
+	}
+	if err := spinRun("Creating root partition (remainder)", "sgdisk", "-n", "2:0:0", "-t", "2:8300", disk); err != nil {
+		return err
+	}
+
+	p := disk
+	if strings.Contains(disk, "nvme") || strings.Contains(disk, "mmcblk") {
+		p += "p"
+	}
+	efi := p + "1"
+	root := p + "2"
+
+	if err := spinRun("Formatting EFI (FAT32)", "mkfs.fat", "-F32", efi); err != nil {
+		return err
+	}
+	if err := spinRun("Formatting root (ext4)", "mkfs.ext4", "-F", root); err != nil {
+		return err
+	}
+	if err := spinRun("Mounting root", "mount", root, "/mnt"); err != nil {
+		return err
+	}
+	if err := os.MkdirAll("/mnt/boot/efi", 0755); err != nil {
+		return err
+	}
+	return spinRun("Mounting EFI", "mount", efi, "/mnt/boot/efi")
 }
 
-func installBase(cfg Config) {
-	header("Installing eXodite Base")
-	pkgs := []string{"base", "base-devel", "linux-firmware", "networkmanager", "grub", "efibootmgr", "nano", "git", "fastfetch", cfg.Kernel, cfg.Kernel + "-headers"}
-	
-	if cfg.Kernel == "linux" {
-		pkgs = append(pkgs, "nvidia", "nvidia-utils")
+func installBase(cfg Config) error {
+	pkgs := []string{
+		"base", "base-devel", "linux-firmware",
+		"networkmanager", "grub", "efibootmgr",
+		"nano", "vim", "git", "fastfetch",
+		cfg.Kernel, cfg.Kernel + "-headers",
+	}
+
+	if strings.HasPrefix(cfg.GPU, "NVIDIA") {
+		if cfg.Kernel == "linux" {
+			pkgs = append(pkgs, "nvidia", "nvidia-utils", "nvidia-settings")
+		} else {
+			pkgs = append(pkgs, "nvidia-dkms", "nvidia-utils", "nvidia-settings")
+		}
 	} else {
-		pkgs = append(pkgs, "nvidia-dkms", "nvidia-utils")
+		pkgs = append(pkgs, "mesa", "vulkan-radeon", "vulkan-intel", "libva-mesa-driver")
 	}
 
 	if cfg.Kernel == "linux-cachyos" {
-		pkgs = append(pkgs, "cachyos-keyring", "cachyos-mirrorlist", "cachyos-hooks")
+		pkgs = append(pkgs, "cachyos-keyring", "cachyos-mirrorlist")
 	}
 
 	switch cfg.Desktop {
-	case "KDE Plasma": pkgs = append(pkgs, "plasma", "sddm", "konsole")
-	case "XFCE4": pkgs = append(pkgs, "xfce4", "xfce4-goodies", "lightdm", "lightdm-gtk-greeter")
-	case "Hyprland": pkgs = append(pkgs, "hyprland", "kitty", "waybar")
+	case "KDE Plasma":
+		pkgs = append(pkgs, "plasma", "sddm", "konsole", "dolphin", "ark")
+	case "XFCE4":
+		pkgs = append(pkgs, "xfce4", "xfce4-goodies", "lightdm", "lightdm-gtk-greeter")
+	case "Hyprland":
+		pkgs = append(pkgs, "hyprland", "kitty", "waybar", "wofi", "xdg-desktop-portal-hyprland")
 	}
-	args := append([]string{"/mnt"}, pkgs...)
-	err := run("pacstrap", args...)
-	if err != nil { os.Exit(1) }
+
+	fmt.Println("[*] Running pacstrap — this will take a while...")
+	return run("pacstrap", append([]string{"/mnt"}, pkgs...)...)
 }
 
-func configure(cfg Config) {
-	header("Finalizing Configuration")
-	fstab, _ := exec.Command("genfstab", "-U", "/mnt").Output()
-	os.WriteFile("/mnt/etc/fstab", fstab, 0644)
+func configure(cfg Config) error {
+	fstab, err := exec.Command("genfstab", "-U", "/mnt").Output()
+	if err != nil {
+		return fmt.Errorf("genfstab: %w", err)
+	}
+	if err := os.WriteFile("/mnt/etc/fstab", fstab, 0644); err != nil {
+		return fmt.Errorf("writing fstab: %w", err)
+	}
 
-	osRel := "NAME=\"eXodite Linux\"\nID=exodite\nID_LIKE=arch\nPRETTY_NAME=\"eXodite Linux\"\n"
-	
 	colorPurple := "\x1b[1;35m"
 	colorReset := "\x1b[0m"
-	logo := colorPurple + ` ███████╗██╗  ██╗ ██████╗ ██████╗ ██╗████████╗███████╗
- ██╔════╝╚██╗██╔╝██╔═══██╗██╔══██╗██║╚══██╔══╝██╔════╝
- █████╗   ╚███╔╝ ██║   ██║██║  ██║██║   ██║   █████╗  
- ██╔══╝   ██╔██╗ ██║   ██║██║  ██║██║   ██║   ██╔══╝  
- ███████╗██╔╝ ██╗╚██████╔╝██████╔╝██║   ██║   ███████╗
- ╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚═╝   ╚═╝   ╚══════╝` + colorReset
+	logo := colorPurple +
+		" ███████╗██╗  ██╗ ██████╗ ██████╗ ██╗████████╗███████╗\n" +
+		" ██╔════╝╚██╗██╔╝██╔═══██╗██╔══██╗██║╚══██╔══╝██╔════╝\n" +
+		" █████╗   ╚███╔╝ ██║   ██║██║  ██║██║   ██║   █████╗  \n" +
+		" ██╔══╝   ██╔██╗ ██║   ██║██║  ██║██║   ██║   ██╔══╝  \n" +
+		" ███████╗██╔╝ ██╗╚██████╔╝██████╔╝██║   ██║   ███████╗\n" +
+		" ╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚═╝   ╚═╝   ╚══════╝" +
+		colorReset
+	confJSON := `{"logo":{"source":"/etc/fastfetch/logo.txt"},"modules":["title","os","kernel","uptime","shell","de","cpu","memory"]}`
 
-	confJson := `{"logo": {"source": "/etc/fastfetch/logo.txt"}, "modules": ["title","os","kernel","uptime","packages","shell","de","wm","cpu","gpu","memory"]}`
-
-	os.MkdirAll("/mnt/etc/fastfetch", 0755)
-	os.WriteFile("/mnt/etc/fastfetch/logo.txt", []byte(logo), 0644)
-	os.WriteFile("/mnt/etc/fastfetch/config.jsonc", []byte(confJson), 0644)
-
-	if cfg.Kernel == "linux-cachyos" {
-		runSilent("sh", "-c", "echo 'Server = https://mirror.cachyos.org/repo/x86_64/$repo' > /mnt/etc/pacman.d/cachyos-mirrorlist")
-		runSilent("sh", "-c", "grep -q 'cachyos' /mnt/etc/pacman.conf || echo -e '\n[cachyos]\nInclude = /etc/pacman.d/cachyos-mirrorlist' >> /mnt/etc/pacman.conf")
+	if err := os.MkdirAll("/mnt/etc/fastfetch", 0755); err != nil {
+		return err
+	}
+	if err := os.WriteFile("/mnt/etc/fastfetch/logo.txt", []byte(logo), 0644); err != nil {
+		return err
+	}
+	if err := os.WriteFile("/mnt/etc/fastfetch/config.jsonc", []byte(confJSON), 0644); err != nil {
+		return err
 	}
 
-	script := fmt.Sprintf(`#!/bin/bash
-echo "KEYMAP=%s" > /etc/vconsole.conf
-ln -sf /usr/share/zoneinfo/%s /etc/localtime
-hwclock --systohc
-echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
-locale-gen
-echo "LANG=en_US.UTF-8" > /etc/locale.conf
-echo "%s" > /etc/hostname
-echo '%s' > /etc/os-release
-sed -i 's/GRUB_DISTRIBUTOR="Arch"/GRUB_DISTRIBUTOR="eXodite"/' /etc/default/grub
-sed -i 's/MODULES=()/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
-echo "root:%s" | chpasswd
-useradd -m -G wheel -s /bin/bash %s
-echo "%s:%s" | chpasswd
-echo "%%wheel ALL=(ALL:ALL) ALL" >> /etc/sudoers
-mkinitcpio -P
-grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=eXodite
-grub-mkconfig -o /boot/grub/grub.cfg
-systemctl enable NetworkManager
-`, cfg.Keymap, cfg.Timezone, cfg.Hostname, osRel, cfg.RootPass, cfg.Username, cfg.Username, cfg.Password)
+	passwdLines := "root:" + cfg.RootPass + "\n" + cfg.Username + ":" + cfg.Password + "\n"
+	passwdFile := "/mnt/passwd.tmp"
+	if err := os.WriteFile(passwdFile, []byte(passwdLines), 0600); err != nil {
+		return fmt.Errorf("writing passwd temp file: %w", err)
+	}
 
-	if cfg.Desktop == "KDE Plasma" { script += "systemctl enable sddm\n" }
-	if cfg.Desktop == "XFCE4" { script += "systemctl enable lightdm\n" }
-	script += fmt.Sprintf("echo \"fastfetch\" >> /home/%s/.bashrc\n", cfg.Username)
-	script += "echo \"fastfetch\" >> /root/.bashrc\n"
+	osRel := "NAME=\"eXodite Linux\"\nID=exodite\nID_LIKE=arch\nPRETTY_NAME=\"eXodite Linux\"\n"
+
+	script := "#!/bin/bash\nset -e\n\n"
+
+	script += fmt.Sprintf("ln -sf /usr/share/zoneinfo/%s /etc/localtime\n", cfg.Timezone)
+	script += "hwclock --systohc\n"
+	script += fmt.Sprintf("echo '%s UTF-8' >> /etc/locale.gen\n", cfg.Locale)
+	script += "locale-gen\n"
+	script += fmt.Sprintf("echo 'LANG=%s' > /etc/locale.conf\n", cfg.Locale)
+	script += fmt.Sprintf("echo 'LC_ALL=%s' >> /etc/locale.conf\n", cfg.Locale)
+	script += fmt.Sprintf("echo '%s' > /etc/hostname\n", cfg.Hostname)
+	script += fmt.Sprintf("echo 'KEYMAP=%s' > /etc/vconsole.conf\n", cfg.Keymap)
+	script += fmt.Sprintf("echo '127.0.0.1 localhost\n::1 localhost\n127.0.1.1 %s.localdomain %s' > /etc/hosts\n",
+		cfg.Hostname, cfg.Hostname)
+
+	script += fmt.Sprintf("printf '%%s' %q | tee /etc/os-release > /dev/null\n", osRel)
+
+	script += "sed -i 's/GRUB_DISTRIBUTOR=\"Arch\"/GRUB_DISTRIBUTOR=\"eXodite\"/' /etc/default/grub\n"
+
+	if strings.HasPrefix(cfg.GPU, "NVIDIA") {
+		script += "sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT=\"[^\"]*/& nvidia-drm.modeset=1/' /etc/default/grub\n"
+		script += "sed -i 's/MODULES=()/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf\n"
+	}
+
+	script += "chpasswd < /passwd.tmp\n"
+	script += "rm -f /passwd.tmp\n"
+
+	script += fmt.Sprintf("useradd -m -G wheel -s /bin/bash '%s'\n", cfg.Username)
+
+	script += "echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/10-wheel\n"
+	script += "chmod 440 /etc/sudoers.d/10-wheel\n"
+
+	script += "mkinitcpio -P\n"
+	script += "grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=eXodite\n"
+	script += "grub-mkconfig -o /boot/grub/grub.cfg\n"
+
+	script += "systemctl enable NetworkManager\n"
+	switch cfg.Desktop {
+	case "KDE Plasma":
+		script += "systemctl enable sddm\n"
+	case "XFCE4":
+		script += "systemctl enable lightdm\n"
+	}
+
+	script += fmt.Sprintf("echo 'fastfetch' >> /home/%s/.bashrc\n", cfg.Username)
+	script += "echo 'fastfetch' >> /root/.bashrc\n"
 
 	if cfg.InstallYay == "Yes" {
-		script += fmt.Sprintf("su - %s -c \"git clone https://aur.archlinux.org/yay-bin.git ~/yay-bin && cd ~/yay-bin && makepkg -si --noconfirm\"\n", cfg.Username)
+		postInstall := fmt.Sprintf(`#!/bin/bash
+set -e
+git clone https://aur.archlinux.org/yay-bin.git ~/yay-bin
+cd ~/yay-bin && makepkg -si --noconfirm
+rm -rf ~/yay-bin
+echo "Yay installed successfully."
+`, cfg.Username)
+		script += fmt.Sprintf("echo %q > /home/%s/install-yay.sh\n", postInstall, cfg.Username)
+		script += fmt.Sprintf("chmod +x /home/%s/install-yay.sh\n", cfg.Username)
+		script += fmt.Sprintf("chown %s:%s /home/%s/install-yay.sh\n",
+			cfg.Username, cfg.Username, cfg.Username)
+		script += fmt.Sprintf("echo 'echo \"Run ~/install-yay.sh to install Yay (AUR helper)\"' >> /home/%s/.bashrc\n",
+			cfg.Username)
 	}
 
-	os.WriteFile("/mnt/setup.sh", []byte(script), 0755)
-	os.Chmod("/mnt/setup.sh", 0755)
-	run("arch-chroot", "/mnt", "/bin/bash", "/setup.sh")
-	os.Remove("/mnt/setup.sh")
+	scriptPath := "/mnt/setup.sh"
+	if err := os.WriteFile(scriptPath, []byte(script), 0700); err != nil {
+		return fmt.Errorf("writing setup script: %w", err)
+	}
+
+	err = run("arch-chroot", "/mnt", "/bin/bash", "/setup.sh")
+
+	os.Remove(scriptPath)
+	os.Remove(passwdFile)
+
+	return err
 }

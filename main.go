@@ -10,6 +10,8 @@ import (
 	"golang.org/x/term"
 )
 
+var scanner = bufio.NewScanner(os.Stdin)
+
 type Config struct {
 	Disk       string
 	Kernel     string
@@ -168,7 +170,6 @@ func prompt(msg, def string, mask bool) string {
 		return string(b)
 	}
 
-	scanner := bufio.NewScanner(os.Stdin)
 	if scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -408,6 +409,14 @@ func configure(cfg Config) error {
 		return fmt.Errorf("writing fstab: %w", err)
 	}
 
+	if cfg.Kernel == "linux-cachyos" {
+		f, err := os.OpenFile("/mnt/etc/pacman.conf", os.O_APPEND|os.O_WRONLY, 0644)
+		if err == nil {
+			f.WriteString("\n[cachyos]\nInclude = /etc/pacman.d/cachyos-mirrorlist\n")
+			f.Close()
+		}
+	}
+
 	colorPurple := "\x1b[1;35m"
 	colorReset := "\x1b[0m"
 	logo := colorPurple +
@@ -461,11 +470,10 @@ func configure(cfg Config) error {
 	}
 
 	script += fmt.Sprintf("useradd -m -G wheel -s /bin/bash '%s'\n", cfg.Username)
-
 	script += "chpasswd < /passwd.tmp\n"
 	script += "rm -f /passwd.tmp\n"
 
-	script += "echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/10-wheel\n"
+	script += "echo '%wheel ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/10-wheel\n"
 	script += "chmod 440 /etc/sudoers.d/10-wheel\n"
 
 	script += "mkinitcpio -P\n"
@@ -484,20 +492,21 @@ func configure(cfg Config) error {
 	script += "echo 'fastfetch' >> /root/.bashrc\n"
 
 	if cfg.InstallYay == "Yes" {
-		postInstall := fmt.Sprintf(`#!/bin/bash
+		postInstall := `#!/bin/bash
 set -e
-git clone https://aur.archlinux.org/yay-bin.git ~/yay-bin
-cd ~/yay-bin && makepkg -si --noconfirm
-rm -rf ~/yay-bin
+git clone https://aur.archlinux.org/yay-bin.git /tmp/yay-bin
+cd /tmp/yay-bin && makepkg -si --noconfirm
+rm -rf /tmp/yay-bin
 echo "Yay installed successfully."
-`, cfg.Username)
-		script += fmt.Sprintf("echo %q > /home/%s/install-yay.sh\n", postInstall, cfg.Username)
+`
+		script += fmt.Sprintf("cat << 'EOF_YAY' > /home/%s/install-yay.sh\n%s\nEOF_YAY\n", cfg.Username, postInstall)
 		script += fmt.Sprintf("chmod +x /home/%s/install-yay.sh\n", cfg.Username)
-		script += fmt.Sprintf("chown %s:%s /home/%s/install-yay.sh\n",
-			cfg.Username, cfg.Username, cfg.Username)
-		script += fmt.Sprintf("echo 'echo \"Run ~/install-yay.sh to install Yay (AUR helper)\"' >> /home/%s/.bashrc\n",
-			cfg.Username)
+		script += fmt.Sprintf("chown %s:%s /home/%s/install-yay.sh\n", cfg.Username, cfg.Username, cfg.Username)
+		script += fmt.Sprintf("su - %s -c \"/home/%s/install-yay.sh\"\n", cfg.Username, cfg.Username)
+		script += fmt.Sprintf("rm /home/%s/install-yay.sh\n", cfg.Username)
 	}
+
+	script += "echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/10-wheel\n"
 
 	scriptPath := "/mnt/setup.sh"
 	if err := os.WriteFile(scriptPath, []byte(script), 0700); err != nil {

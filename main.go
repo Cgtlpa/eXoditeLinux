@@ -164,15 +164,15 @@ func menuSelect(title string, options []string) string {
 		}
 
 		switch {
-		case n == 3 && buf[0] == 27 && buf[1] == 91 && buf[2] == 65: // Up
+		case n == 3 && buf[0] == 27 && buf[1] == 91 && buf[2] == 65:
 			if selected > 0 {
 				selected--
 			}
-		case n == 3 && buf[0] == 27 && buf[1] == 91 && buf[2] == 66: // Down
+		case n == 3 && buf[0] == 27 && buf[1] == 91 && buf[2] == 66:
 			if selected < len(options)-1 {
 				selected++
 			}
-		case buf[0] == 10 || buf[0] == 13: // Enter
+		case buf[0] == 10 || buf[0] == 13:
 			return options[selected]
 		}
 	}
@@ -234,7 +234,7 @@ func setupCachyLive() error {
 		if err != nil {
 			return fmt.Errorf("opening pacman.conf: %w", err)
 		}
-		_, werr := f.WriteString("\n[cachyos]\nInclude = /etc/pacman.d/cachyos-mirrorlist\n")
+		_, werr := f.WriteString("\n[cachyos]\nServer = https://mirror.cachyos.org/$repo/$arch\n")
 		f.Close()
 		if werr != nil {
 			return fmt.Errorf("writing pacman.conf: %w", werr)
@@ -397,7 +397,6 @@ func partition(cfg Config) error {
 }
 
 func installBase(cfg Config) error {
-
 	pkgs := []string{
 		"base", "sddm", "base-devel", "linux-firmware",
 		"networkmanager", "grub", "efibootmgr",
@@ -405,14 +404,11 @@ func installBase(cfg Config) error {
 		cfg.Kernel, cfg.Kernel + "-headers",
 	}
 
-	if strings.HasPrefix(cfg.GPU, "NVIDIA") {
-		
-		if cfg.GPU != "NVIDIA 580xx (AUR, DKMS)" {
-			if cfg.Kernel == "linux" {
-				pkgs = append(pkgs, "nvidia", "nvidia-utils", "nvidia-settings")
-			} else {
-				pkgs = append(pkgs, "nvidia-dkms", "nvidia-utils", "nvidia-settings")
-			}
+	if strings.HasPrefix(cfg.GPU, "NVIDIA") && cfg.GPU != "NVIDIA 580xx (AUR, DKMS)" {
+		if cfg.Kernel == "linux" {
+			pkgs = append(pkgs, "nvidia", "nvidia-utils", "nvidia-settings")
+		} else {
+			pkgs = append(pkgs, "nvidia-dkms", "nvidia-utils", "nvidia-settings")
 		}
 	} else if strings.HasPrefix(cfg.GPU, "Open Source") {
 		pkgs = append(pkgs, "mesa", "vulkan-radeon", "vulkan-intel", "libva-mesa-driver")
@@ -474,12 +470,9 @@ func configure(cfg Config) error {
 
 	osRel := "NAME=\"eXodite Linux\"\nID=exodite\nID_LIKE=arch\nPRETTY_NAME=\"eXodite Linux\"\n"
 
-
 	script := "#!/bin/bash\nset -e\n\n"
-
 	script += fmt.Sprintf("GPU_DRIVER=%q\n", cfg.GPU)
 	script += fmt.Sprintf("INSTALL_YAY=%q\n", cfg.InstallYay)
-
 
 	script += fmt.Sprintf("ln -sf /usr/share/zoneinfo/%s /etc/localtime\n", cfg.Timezone)
 	script += "hwclock --systohc\n"
@@ -501,12 +494,18 @@ func configure(cfg Config) error {
 		script += "sed -i 's/MODULES=()/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf\n"
 	}
 
-	// User setup
-	script += fmt.Sprintf("useradd -m -G wheel -s /bin/bash '%s'\n", cfg.Username)
+	if cfg.Kernel == "linux-cachyos" {
+		script += `
+if ! grep -q '\[cachyos\]' /etc/pacman.conf; then
+    printf '\n[cachyos]\nServer = https://mirror.cachyos.org/$repo/$arch\n' >> /etc/pacman.conf
+fi
+pacman -Sy --noconfirm cachyos-keyring
+`
+	}
 
+	script += fmt.Sprintf("useradd -m -G wheel -s /bin/bash '%s'\n", cfg.Username)
 	script += "chpasswd < /passwd.tmp\n"
 	script += "rm -f /passwd.tmp\n"
-
 	script += "echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/10-wheel\n"
 	script += "chmod 440 /etc/sudoers.d/10-wheel\n"
 
@@ -514,8 +513,7 @@ func configure(cfg Config) error {
 YAY_DONE=0
 
 if [ "$GPU_DRIVER" = "NVIDIA 580xx (AUR, DKMS)" ]; then
-    echo "==> Installing yay (AUR helper) for NVIDIA 580xx driver..."
-    # Temporary user for building AUR packages
+    echo "==> Installing yay for NVIDIA 580xx driver..."
     useradd -m -s /bin/bash tempbuilder || true
     usermod -aG wheel tempbuilder
     echo '%wheel ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/99-yay-build
@@ -541,16 +539,23 @@ if [ "$GPU_DRIVER" = "NVIDIA 580xx (AUR, DKMS)" ]; then
 fi
 `
 
-	
 	script += `
+echo "==> Fixing mkinitcpio hooks..."
+sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block filesystems keyboard fsck)/' /etc/mkinitcpio.conf
+`
+
+	script += `
+echo "==> Building initramfs..."
 mkinitcpio -P
+
+echo "==> Installing GRUB..."
+ROOT_UUID=$(findmnt -n -o UUID /)
+sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=\"|GRUB_CMDLINE_LINUX_DEFAULT=\"root=UUID=$ROOT_UUID |" /etc/default/grub
 grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=eXodite
 grub-mkconfig -o /boot/grub/grub.cfg
 `
 
-
 	script += "systemctl enable NetworkManager\n"
-
 	switch cfg.Desktop {
 	case "KDE Plasma":
 		script += "systemctl enable sddm\n"
@@ -560,11 +565,9 @@ grub-mkconfig -o /boot/grub/grub.cfg
 		script += "systemctl enable lightdm\n"
 	}
 
-
 	script += fmt.Sprintf("echo 'fastfetch' >> /home/%s/.bashrc\n", cfg.Username)
 	script += "echo 'fastfetch' >> /root/.bashrc\n"
 
-	
 	script += `
 if [ "$INSTALL_YAY" = "Yes" ] && [ "$YAY_DONE" -eq 0 ]; then
     echo "==> Installing yay for user..."
